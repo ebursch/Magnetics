@@ -1,5 +1,5 @@
 // App shell: header · left rail (shot picker) · tabbed main.
-// The four tabs are independent files owned by different people — they read from
+// The tabs are independent files owned by different people — they read from
 // the store and render `kind`-nodes via <NodeView>. Adding a view = one file.
 //
 // `gui` is the GUI integration branch: teammates branch off it (gui-<view>) and
@@ -14,11 +14,13 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import SensorsTab from "./components/tabs/SensorsTab";
 import QuasiStationaryTab from "./components/tabs/QuasiStationaryTab";
 import RotatingTab from "./components/tabs/RotatingTab";
+import ComparisonTab from "./components/tabs/ComparisonTab";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "sensors", label: "Sensors" },
   { id: "qs", label: "Quasi-stationary" },
   { id: "rotating", label: "Rotating modes" },
+  { id: "compare", label: "Compare" },
 ];
 
 export default function App() {
@@ -182,8 +184,10 @@ export default function App() {
               <SensorsTab machine={machine} />
             ) : tab === "qs" ? (
               <QuasiStationaryTab machine={machine} />
-            ) : (
+            ) : tab === "rotating" ? (
               <RotatingTab machine={machine} />
+            ) : (
+              <ComparisonTab machine={machine} />
             )}
           </ErrorBoundary>
         )}

@@ -9,11 +9,11 @@ import { useNode } from "../../lib/useNode";
 import NodeView from "../../lib/NodeView";
 import Plot from "../../lib/Plot";
 import type { ContourNode, LineNode, MetricsNode } from "../../lib/contract";
-import { phiPeak as phiPeakFn, phiRms as phiRmsFn } from "../../lib/qsTransforms";
+import { QS_DEFAULTS, phiPeak as phiPeakFn, phiRms as phiRmsFn } from "../../lib/qsTransforms";
 import { fetchDevices, type DeviceInfo } from "../../lib/api";
-
-// ── Colorblind-safe palette (Wong 2011) — for sensor/channel traces ──
-const LINE_PALETTE = ["#0072B2", "#E69F00", "#56B4E9", "#D55E00", "#CC79A7", "#009E73", "#F0E442"];
+import {
+  LINE_PALETTE, QS_MODE_PALETTE as MODE_PALETTE, lineTraces, phiTimeTraces, type PhiColormap,
+} from "../../lib/plotTraces";
 
 // Excluded sensors are drawn on the maps but de-emphasised (thin grey dashes) so
 // the user can still see where the deselected/broken probes sit.
@@ -28,10 +28,6 @@ const CREDS_HINT =
   "Enter your username in the left “Pull a shot” panel (plus password/Duo if your "
   + "account needs them) to fetch new signals.";
 
-// ── Mode-number palette — green/purple/red for n=1,2,3,… ─────────────
-// Clearly distinct hues so each mode reads immediately, not blue/orange.
-const MODE_PALETTE = ["#2ca02c", "#9467bd", "#d62728", "#8c564b", "#e377c2", "#bcbd22", "#17becf"];
-
 // ── Hooks & helpers ───────────────────────────────────────────────────
 // Plotly chrome (axis colors, base font) is themed identically by the shared
 // <Plot> wrapper's baseLayout() — no need to duplicate it here.
@@ -44,55 +40,6 @@ function useDarkMode(): boolean {
 // sites (returns the caller's overrides; the wrapper applies the theme).
 function themedLayout(_dark: boolean, overrides: Partial<Plotly.Layout>): Partial<Plotly.Layout> {
   return overrides;
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
-// Build Plotly traces from a LineNode, optionally with per-series visibility overrides.
-function lineTraces(
-  node: LineNode,
-  opts?: { visible?: boolean[]; opacity?: number[]; palette?: string[] },
-): Partial<Plotly.PlotData>[] {
-  const pal = opts?.palette ?? LINE_PALETTE;
-  const traces: Partial<Plotly.PlotData>[] = [];
-
-  node.series.forEach((s, i) => {
-    const color = pal[i % pal.length];
-    const vis = opts?.visible?.[i] !== false;
-    const opacity = opts?.opacity?.[i] ?? 1;
-
-    // ±1σ band from the contract's typed lower/upper fields (also what the
-    // HDF5 export writes, so the band on screen matches the downloaded data).
-    if (s.lower && s.upper && vis) {
-      traces.push({
-        type: "scatter", mode: "lines", x: s.x,
-        y: s.upper,
-        line: { width: 0, color }, showlegend: false, hoverinfo: "skip",
-        opacity,
-      } as Partial<Plotly.PlotData>);
-      traces.push({
-        type: "scatter", mode: "lines", x: s.x,
-        y: s.lower,
-        fill: "tonexty", fillcolor: hexToRgba(color, 0.45 * opacity),
-        line: { width: 0, color }, showlegend: false, hoverinfo: "skip",
-        opacity,
-      } as Partial<Plotly.PlotData>);
-    }
-
-    traces.push({
-      type: "scatter", mode: "lines", name: s.name, x: s.x, y: s.y,
-      line: { color, width: 1.5 },
-      visible: vis ? true : "legendonly",
-      opacity,
-    } as Partial<Plotly.PlotData>);
-  });
-
-  return traces;
 }
 
 // ── Sensor arrays most useful for QS analysis — offline/mock fallback,
@@ -157,26 +104,27 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   // Selective subscriptions: a whole-store destructure re-rendered this heavy tab
   // on EVERY store change (each keystroke in the left rail's credential fields).
   const setCursorMs = useStore((s) => s.setCursorMs);
+  const setQsParams = useStore((s) => s.setQsParams);
   const machines = useStore((s) => s.machines);
 
   // ── Analysis settings ─────────────────────────────────────────────
-  const [ns, setNs]               = useState("1,2,3");
-  const [ms, setMs]               = useState("0");
-  const [channelFilter, setChannelFilter] = useState("Bp LFS midplane");
-  const [detrendType, setDetrendType]     = useState("baseline");
+  const [ns, setNs]               = useState<string>(QS_DEFAULTS.ns);
+  const [ms, setMs]               = useState<string>(QS_DEFAULTS.ms);
+  const [channelFilter, setChannelFilter] = useState<string>(QS_DEFAULTS.channel_filter);
+  const [detrendType, setDetrendType]     = useState<string>(QS_DEFAULTS.detrend_type);
   const [detrendLo, setDetrendLo] = useState("");
   const [detrendHi, setDetrendHi] = useState("");
   const [tminMs, setTminMs]       = useState("");  // "" = auto (read from HDF5)
   const [tmaxMs, setTmaxMs]       = useState("");
-  const [colormapChoice, setColormapChoice] = useState<"rdbu" | "cividis" | "viridis">("rdbu");
+  const [colormapChoice, setColormapChoice] = useState<PhiColormap>("rdbu");
 
   // ── Advanced fit-tuning settings ───────────────────────────────────
-  const [uncertainty, setUncertainty]   = useState("2e-5");
-  const [energyFraction, setEnergyFraction] = useState("0.98");
-  const [fitBasis, setFitBasis]         = useState("sinusoidal-integral");
-  const [fitCond, setFitCond]           = useState("1000"); // OMFIT SLCONTOUR inversion cutoff (1/rcond), not the K>10 trust threshold
-  const [cutoffLo, setCutoffLo]         = useState("5.0");
-  const [cutoffHi, setCutoffHi]         = useState("250.0");
+  const [uncertainty, setUncertainty]   = useState<string>(QS_DEFAULTS.sigma);
+  const [energyFraction, setEnergyFraction] = useState<string>(QS_DEFAULTS.energy);
+  const [fitBasis, setFitBasis]         = useState<string>(QS_DEFAULTS.fit_basis);
+  const [fitCond, setFitCond]           = useState<string>(QS_DEFAULTS.fit_cond); // OMFIT SLCONTOUR inversion cutoff (1/rcond), not the K>10 trust threshold
+  const [cutoffLo, setCutoffLo]         = useState<string>(QS_DEFAULTS.cutoff_lo);
+  const [cutoffHi, setCutoffHi]         = useState<string>(QS_DEFAULTS.cutoff_hi);
 
   // ── Devices (for the Array dropdown's sensor-set list) ─────────────
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
@@ -268,6 +216,11 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
     setCommittedParams(qsParams);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally run once on mount only
   }, []);
+
+  // Publish the committed fit params so the Compare view plots this same fit.
+  useEffect(() => {
+    if (committedParams) setQsParams(committedParams);
+  }, [committedParams, setQsParams]);
 
   // When Plot is clicked (committedParams changes), reset zoom to fit new data.
   useEffect(() => {
@@ -827,34 +780,10 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   [fitResNode, sharedSigResRange, timeXAxis]);
 
   // ── Section 8: phi_t waterfall ────────────────────────────────────
-  const cmapProps = useMemo(() => {
-    if (colormapChoice === "cividis") return { colorscale: "Cividis", reversescale: false };
-    if (colormapChoice === "viridis") return { colorscale: "Viridis", reversescale: false };
-    return { colorscale: "RdBu", reversescale: true };  // RdBu_r ≈ notebook matplotlib
-  }, [colormapChoice]);
-
-  const phiTimeData = useMemo((): Partial<Plotly.PlotData>[] => {
-    if (!phiTimePlot) return [];
-    const [zmin, zmax] = phiTimePlot.zrange ?? [-42, 42];
-    const traces: Partial<Plotly.PlotData>[] = [{
-      type: "heatmap" as const,
-      x: phiTimePlot.x, y: phiTimePlot.y, z: phiTimePlot.z,
-      ...cmapProps,
-      zmin, zmax,
-      zsmooth: false,
-      showscale: true,
-      colorbar: { title: { text: "Fit" }, thickness: 12, outlinewidth: 0 },
-    } as Partial<Plotly.PlotData>];
-    if (phiPeak) {
-      traces.push({
-        type: "scatter" as const, mode: "markers" as const,
-        x: phiTimePlot.x, y: phiPeak,
-        marker: { symbol: "circle-open" as const, size: 4, color: "white", line: { width: 1, color: "white" } },
-        hoverinfo: "skip" as const, showlegend: false,
-      } as Partial<Plotly.PlotData>);
-    }
-    return traces;
-  }, [phiTimePlot, phiPeak, cmapProps]);
+  const phiTimeData = useMemo(
+    () => (phiTimePlot ? phiTimeTraces(phiTimePlot, phiPeak, colormapChoice) : []),
+    [phiTimePlot, phiPeak, colormapChoice],
+  );
 
   const phiYRange = useMemo((): [number, number] =>
     (phiYMin !== "" && phiYMax !== "") ? [Number(phiYMin), Number(phiYMax)] : [0, 360],

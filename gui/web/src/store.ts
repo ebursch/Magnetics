@@ -1,6 +1,7 @@
 // Global UI state (zustand). Deliberately small: the selected machine/shot, the
-// active tab, and the shared time cursor that links the quasi-stationary and
-// rotating views (VISION §6.4). Views read what they need and render nodes from
+// active tab, the shared time cursor that links the quasi-stationary and
+// rotating views (VISION §6.4), the analysis params each of those views last ran
+// (so the Compare view plots the same analysis), and the per-shot annotations. Views read what they need and render nodes from
 // the API; heavy data stays in the nodes, not here.
 import { create } from "zustand";
 import {
@@ -11,8 +12,11 @@ import {
   type DeviceInfo,
   type MachineInfo,
 } from "./lib/api";
+import {
+  newAnnotationId, parseAnnotations, type Annotation, type AnnotationInput, type AnnotationPatch,
+} from "./lib/annotations";
 
-export type TabId = "sensors" | "qs" | "rotating";
+export type TabId = "sensors" | "qs" | "rotating" | "compare";
 export type Theme = "dark" | "light";
 
 // Backend + DIII-D credentials for a live pull. Lifted out of PullControl so the
@@ -73,6 +77,34 @@ export function applyFontScale(n: number) {
   document.documentElement.style.setProperty("--font-scale", String(n));
 }
 
+// ── Per-shot plot annotations (Compare view) ────────────────────────────────
+// Keyed by machine id, persisted as JSON. Every read is validated (parseAnnotations)
+// and storage failures are swallowed — annotations are a convenience, never fatal.
+const ANNOTATIONS_KEY = "magnetics-annotations";
+function loadAnnotations(): Record<string, Annotation[]> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw: unknown = JSON.parse(window.localStorage.getItem(ANNOTATIONS_KEY) ?? "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, Annotation[]> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      const list = parseAnnotations(v);
+      if (list.length) out[k] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+function saveAnnotations(all: Record<string, Annotation[]>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ANNOTATIONS_KEY, JSON.stringify(all));
+  } catch {
+    /* quota / private mode — keep the in-memory copy */
+  }
+}
+
 // Apply synchronously at module load so the first paint matches (no flash).
 applyTheme(loadTheme());
 applyFontScale(loadFontScale());
@@ -88,6 +120,12 @@ interface State {
   theme: Theme;
   fetchCreds: FetchCreds; // shared by PullControl + the QS custom-signal panel
   fontScale: number;
+  // Params of the last spectrogram / mode-number fetch the Rotating tab made, and of
+  // the last committed quasi-stationary fit — null until that tab has run (the
+  // Compare view then falls back to the same defaults those tabs start from).
+  rotParams: { spec: Record<string, number>; mode: Record<string, number> } | null;
+  qsParams: Record<string, string> | null;
+  annotations: Record<string, Annotation[]>; // keyed by machine id
 
   init: () => Promise<void>;
   removeMachine: (id: string) => Promise<void>;
@@ -99,6 +137,12 @@ interface State {
   toggleTheme: () => void;
   setFetchCreds: (patch: Partial<FetchCreds>) => void;
   setFontScale: (n: number) => void;
+  setRotParams: (p: { spec: Record<string, number>; mode: Record<string, number> }) => void;
+  setQsParams: (p: Record<string, string>) => void;
+  addAnnotation: (machine: string, a: AnnotationInput) => void;
+  updateAnnotation: (machine: string, id: string, patch: AnnotationPatch) => void;
+  removeAnnotation: (machine: string, id: string) => void;
+  setAnnotations: (machine: string, list: Annotation[]) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -119,6 +163,9 @@ export const useStore = create<State>((set) => ({
     duoPasscode: "",
   },
   fontScale: loadFontScale(),
+  rotParams: null,
+  qsParams: null,
+  annotations: loadAnnotations(),
 
   async init() {
     // fetchDevices() guards its own errors and returns [] (no live backend / no
@@ -158,6 +205,17 @@ export const useStore = create<State>((set) => ({
   setDevice: (id) => set({ device: id }),
   setTab: (t) => set({ tab: t }),
   setCursorMs: (t) => set({ cursorMs: t }),
+  setRotParams: (p) => set({ rotParams: p }),
+  setQsParams: (p) => set({ qsParams: p }),
+  addAnnotation: (machine, a) =>
+    set((s) => withAnnotations(s, machine, [...(s.annotations[machine] ?? []), { ...a, id: newAnnotationId() } as Annotation])),
+  updateAnnotation: (machine, id, patch) =>
+    set((s) =>
+      withAnnotations(s, machine, (s.annotations[machine] ?? []).map((a) => (a.id === id ? ({ ...a, ...patch } as Annotation) : a))),
+    ),
+  removeAnnotation: (machine, id) =>
+    set((s) => withAnnotations(s, machine, (s.annotations[machine] ?? []).filter((a) => a.id !== id))),
+  setAnnotations: (machine, list) => set((s) => withAnnotations(s, machine, list)),
   setFetchCreds: (patch) => set((s) => ({ fetchCreds: { ...s.fetchCreds, ...patch } })),
   toggleTheme: () =>
     set((s) => {
@@ -175,6 +233,15 @@ export const useStore = create<State>((set) => ({
     set({ fontScale: n });
   },
 }));
+
+// Replace one machine's annotation list (dropping the key when empty) and persist.
+function withAnnotations(s: State, machine: string, list: Annotation[]): Pick<State, "annotations"> {
+  const annotations = { ...s.annotations };
+  if (list.length) annotations[machine] = list;
+  else delete annotations[machine];
+  saveAnnotations(annotations);
+  return { annotations };
+}
 
 // Keep the theme in sync across browser tabs: toggleTheme writes localStorage, so a
 // `storage` event fires in every OTHER tab — mirror it into the store + the DOM.

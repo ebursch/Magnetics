@@ -2,16 +2,17 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import type * as Plotly from "plotly.js";
 import { useStore } from "../../store";
 import { useNode } from "../../lib/useNode";
-import { MODE_PALETTE, POWER_SEQUENTIAL, FIELD_DIVERGING, modeColor } from "../../lib/colormaps";
+import { POWER_SEQUENTIAL, FIELD_DIVERGING, modeColor } from "../../lib/colormaps";
 import Plot from "../../lib/Plot";
 import NodeView from "../../lib/NodeView";
 import DraggableDivider from "../../lib/DraggableDivider";
 import { usingLiveBackend, fetchChannelUsage, type ChannelUsage } from "../../lib/api";
 import type { Node } from "../../lib/contract";
-import { GATE_POS_MAX, gatePosToPct, medianStep, percentile } from "../../lib/rotatingTransforms";
-
-// Slider position that yields ≈70% by default (a sensible noise floor to start).
-const GATE_POS_DEFAULT = 227;
+import {
+  GATE_POS_DEFAULT, GATE_POS_MAX, gatePosToPct, medianStep, percentile, rotFetchParams,
+  ROT_DEFAULTS,
+} from "../../lib/rotatingTransforms";
+import { spectrogramTrace } from "../../lib/plotTraces";
 
 // Offline synthetic-demo constants. These were formerly user-facing knobs (PEST λ and
 // sensor-shielding cutoff) that only ever affected the no-backend demo — they have no
@@ -63,6 +64,7 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // in the left rail's credential fields.
   const cursorMs = useStore((s) => s.cursorMs);
   const setCursorMs = useStore((s) => s.setCursorMs);
+  const setRotParams = useStore((s) => s.setRotParams);
   // Foreground ink that flips with the theme so the raw dB/dt trace stays visible on
   // the light plot background (it was hard-coded white → invisible in light mode).
   const dark = useStore((s) => s.theme === "dark");
@@ -74,10 +76,10 @@ export default function RotatingTab({ machine }: { machine: string }) {
   const [channelInfo, setChannelInfo] = useState<ChannelUsage | null>(null);
 
   // Control Parameter states
-  const [fmin, setFmin] = useState<number>(0);
-  const [fmax, setFmax] = useState<number>(50);
+  const [fmin, setFmin] = useState<number>(ROT_DEFAULTS.fmin);
+  const [fmax, setFmax] = useState<number>(ROT_DEFAULTS.fmax);
   const [fittype, setFittype] = useState<number>(2); // 0 = circular, 1 = toroidicity, 2 = PEST theta*
-  const [smoothing, setSmoothing] = useState<number>(5);
+  const [smoothing, setSmoothing] = useState<number>(ROT_DEFAULTS.smoothing);
   // Power gate: a percentile floor on cell power; hides low-power noise in BOTH the
   // power spectrogram (client-side) and the n-map (server n_amp_pct). The slider stores
   // a linear position; gatePosToPct maps it to a percentile that scrubs finely near 100%.
@@ -88,26 +90,26 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // Coherence gate γ² ∈ [0,1]: drops spectrogram cells whose 2-point magnitude-squared
   // coherence is below this (incoherent electronic noise), via the core denoise_spectrogram.
   // 0 = off, so the default view is unchanged. Applies to the POWER spectrogram only.
-  const [coherenceMin, setCoherenceMin] = useState<number>(0);
+  const [coherenceMin, setCoherenceMin] = useState<number>(ROT_DEFAULTS.coherenceMin);
   // Mode-coherence gate for the n-map: the per-cell harmonic energy fraction ∈ [1/M, 1]
   // (1 = a pure single-n pattern, 1/M = white across harmonics = noise; M = 2·n_max+1).
   // Distinct quantity from the 2-point γ² above — it gates the mode-number plot, not the
   // power view. Default 0.3 (real cells rarely exceed ~0.5, unlike the resultant length).
-  const [nGate, setNGate] = useState<number>(0.3);
+  const [nGate, setNGate] = useState<number>(ROT_DEFAULTS.nGate);
   // Optional 2-D Gaussian pre-smoothing (before the gates): blurs power/coherence (and the
   // n-map quality/amplitude) over (time, frequency) so contiguous coherent structure survives
   // aggressive gating. Off by default (σ=0 ⇒ exact no-op).
-  const [smoothOn, setSmoothOn] = useState<boolean>(false);
+  const [smoothOn, setSmoothOn] = useState<boolean>(ROT_DEFAULTS.smoothOn);
   // σ in *grid cells* (STFT bins), not physical ms/kHz: one cell = one (t, f) bin at the
   // current resolution, so the blur spans the same number of neighbours regardless of the
   // slice/column knobs — and can't collapse to a sub-bin no-op. The readout below the sliders
   // shows the physical equivalent for the live grid. Skewed to σ_time > σ_freq to fill gaps
   // along a ridge without merging neighbouring modes in frequency.
-  const [smoothTcells, setSmoothTcells] = useState<number>(3);
-  const [smoothFcells, setSmoothFcells] = useState<number>(1.5);
+  const [smoothTcells, setSmoothTcells] = useState<number>(ROT_DEFAULTS.smoothTcells);
+  const [smoothFcells, setSmoothFcells] = useState<number>(ROT_DEFAULTS.smoothFcells);
   // STFT window for the LIVE backend spectrogram (ms). Frequency resolution is
   // 1/window, so 2 ms → 500 Hz bins (sharper than the 1 ms / 1 kHz default).
-  const [specSliceMs, setSpecSliceMs] = useState<number>(2);
+  const [specSliceMs, setSpecSliceMs] = useState<number>(ROT_DEFAULTS.specSliceMs);
 
   // Advanced Parameter states
   const [advancedExpanded, setAdvancedExpanded] = useState<boolean>(false);
@@ -164,28 +166,14 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // band ×3 nodes. These don't depend on the time cursor, so scrubbing never refetches.
   // `smoothing` is the coherence-estimation window (backend `coherence_smooth`): it
   // re-runs the core and changes the real coherence map → the sub-interval coherence trace.
-  // Server-side denoise: the coherence gate and the per-frequency power floor both run in
-  // the core (denoise_spectrogram) so the spectrogram, 2-point n-map, and n-spectrum all
-  // threshold on ONE consistent (t, f) grid — no client-side blanking on the live path.
+  // Server-side denoise (coherence gate + per-frequency power floor) and the optional 2-D
+  // Gaussian pre-smoothing are folded into these params by rotFetchParams — see there.
   // The Power Gate slider is a percentile floor: keep cells ≥ the p-th percentile of each
-  // frequency's power over time (power_floor_k=1 × that percentile). 0 on both = no-op.
-  const denoiseOn = coherenceMin > 0 || powerGate > 0;
-  // 2-D Gaussian pre-smoothing params, shared by every spectral node so all views smooth on
-  // one basis. Effective only when the toggle is on and a σ is non-zero (else a server no-op).
-  const smoothActive = smoothOn && (smoothTcells > 0 || smoothFcells > 0);
-  const smoothParams = {
-    smooth: smoothActive ? 1 : 0,
-    smooth_t_cells: smoothActive ? smoothTcells : 0,
-    smooth_f_cells: smoothActive ? smoothFcells : 0,
-  };
-  const specParams = {
-    slice_duration: specSliceMs / 1000, max_columns: 1000, fmin, fmax, smoothing,
-    denoise: denoiseOn ? 1 : 0,
-    coherence_min: coherenceMin,
-    power_floor_k: powerGate > 0 ? 1.0 : 0,
-    floor_percentile: powerGate,
-    ...smoothParams,
-  };
+  // frequency's power over time (power_floor_k=1 × that percentile).
+  const { spec: specParams, mode: modeParams } = rotFetchParams({
+    specSliceMs, fmin, fmax, smoothing, coherenceMin, powerGate, nGate,
+    smoothOn, smoothTcells, smoothFcells,
+  });
 
   // Fetch main spectrogram node (real log-power Ḃp(t,f) from the live backend)
   const {
@@ -208,10 +196,15 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // Real toroidal mode-number map n(t,f) — a full-array fit per cell (resolves n=1,2,3,4…
   // that the 2-point estimate aliases away). Backs the "Mode n" toggle, gated server-side.
   // Honors the same resolution knob + band as the power view so the two stay consistent.
-  const { node: modeNumberNode, error: modeNumberError } = useNode(machine, "mode_number", {
-    slice_duration: specSliceMs / 1000, fmin, fmax, n_amp_pct: powerGate, n_gate: nGate,
-    ...smoothParams,
-  });
+  const { node: modeNumberNode, error: modeNumberError } = useNode(machine, "mode_number", modeParams);
+
+  // Publish the spectral params so the Compare view draws this same spectrogram / n-map.
+  // Keyed by value (both objects are rebuilt every render).
+  const rotParamsKey = JSON.stringify([specParams, modeParams]);
+  useEffect(() => {
+    const [spec, mode] = JSON.parse(rotParamsKey) as [Record<string, number>, Record<string, number>];
+    setRotParams({ spec, mode });
+  }, [rotParamsKey, setRotParams]);
 
   // Real 2-point coherence γ²(t,f) ∈ [0,1] — feeds the coherence gate honestly,
   // instead of the previous power-derived stand-in.
@@ -742,43 +735,7 @@ export default function RotatingTab({ machine }: { machine: string }) {
       return null;
     }
 
-    const colorscale: [number, string][] = processedSpecNode.discrete
-      ? (() => {
-          const n = MODE_PALETTE.length;
-          const s: [number, string][] = [];
-          for (let i = 0; i < n; i++) {
-            s.push([i / n, MODE_PALETTE[i]], [(i + 1) / n, MODE_PALETTE[i]]);
-          }
-          return s;
-        })()
-      : POWER_SEQUENTIAL;
-    const zr = processedSpecNode.zrange;
-
-    const data = [
-      {
-        type: "heatmap" as const,
-        x: processedSpecNode.x,
-        y: processedSpecNode.y,
-        z: processedSpecNode.z,
-        colorscale,
-        zmin: zr?.[0],
-        zmax: zr?.[1],
-        zsmooth: (processedSpecNode.discrete ? false : "best") as false | "best" | "fast" | undefined,
-        colorbar: {
-          title: { text: processedSpecNode.axes.z ?? "" },
-          thickness: 12,
-          outlinewidth: 0,
-          ...(processedSpecNode.discrete
-            ? {
-                // one tick per integer mode-number magnitude |n| = 0 … 6
-                tickvals: Array.from({ length: 7 }, (_, i) => i),
-                ticktext: Array.from({ length: 7 }, (_, i) => `${i}`),
-                tickmode: "array" as const,
-              }
-            : {}),
-        },
-      },
-    ];
+    const data = [spectrogramTrace(processedSpecNode)];
 
     const layout = {
       // Preserve the user's zoom/crop across every re-render (slider, toggle, scrub) —
