@@ -1702,18 +1702,46 @@ def _fit_residuals(shot, params=None) -> dict:
     return qs_bridge.fit_to_fit_residuals_node(_prep_qs_ds(shot, params).fit)
 
 
-def _extra_signals(shot, params=None) -> dict:
-    """User-requested raw signals (Ip, Dα, …) as time series → LineNode.
+# Units of the non-sensor signals the fetcher pulls (PTDATA/EFIT native units), by
+# channel kind; plasma signals not listed fall back to "".
+_SIGNAL_UNITS = {"ip": "A", "bt": "T", "kappa": ""}
+_KIND_UNITS = {"coil": "A", "Bp": "T", "Br": "T"}
 
-    The GUI custom-signal panel POSTs the names to /api/fetch (merged into the shot
-    HDF5), then reads them here. `signals` is a comma-separated pointname list; each
-    found channel becomes one series (downsampled to keep the line light), each
-    missing name is reported in ``meta.missing`` so the panel can warn.
+
+def _signal_units(geom, name: str) -> str:
+    if name in _SIGNAL_UNITS:
+        return _SIGNAL_UNITS[name]
+    if geom.family_of(name) == "MPI_BDOT":
+        return "T/s"
+    return _KIND_UNITS.get(geom.kind_of(name), "")
+
+
+def _extra_signals(shot, params=None) -> dict:
+    """User-requested raw signals (Ip, Bt, κ, Dα, …) as time series → LineNode.
+
+    `signals` is a comma-separated channel list; each found channel becomes one series
+    (downsampled to keep the line light), each missing name is reported in
+    ``meta.missing`` so the panel can warn. Names not yet in the shot file are fetched
+    first by the GUI (POST /api/fetch merges them into the shot HDF5).
+
+    ``meta.available`` lists every channel in the shot file grouped by kind —
+    ``plasma`` (Ip, Bt, κ and other non-sensor signals), ``coil`` (3D-coil currents)
+    and ``sensor`` (magnetic probes) — so the GUI can offer them without a fetch;
+    ``meta.units`` gives each returned series' native units. Call with no
+    ``signals`` to get just the listing.
     """
     raw = params.get("signals", "") if params else ""
     names = [n.strip() for n in str(raw).split(",") if n.strip()]
-    have = set(h5source.channel_names(str(shot)))
-    series, found, missing = [], [], []
+    all_names = list(h5source.channel_names(str(shot)))
+    have = set(all_names)
+    geom = _dev_geom(str(shot))
+    groups: dict[str, list[str]] = {"plasma": [], "coil": [], "sensor": []}
+    for nm in sorted(all_names, key=str.lower):
+        kind = geom.kind_of(nm)
+        groups[
+            "plasma" if kind in ("aux", "other") else "coil" if kind == "coil" else "sensor"
+        ].append(nm)
+    series, found, missing, units = [], [], [], {}
     for name in names:
         if name not in have:
             missing.append(name)
@@ -1726,11 +1754,19 @@ def _extra_signals(shot, params=None) -> dict:
             t_ms, d = t_ms[sel], d[sel]
         series.append({"name": name, "x": t_ms.tolist(), "y": d.tolist()})
         found.append(name)
+        units[name] = _signal_units(geom, name)
 
     return contracts.line(
         series,
         {"x": "time (ms)", "y": "signal"},
-        meta={"shot": str(shot), "found": found, "missing": missing, "requested": names},
+        meta={
+            "shot": str(shot),
+            "found": found,
+            "missing": missing,
+            "requested": names,
+            "available": groups,
+            "units": units,
+        },
     )
 
 

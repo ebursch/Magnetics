@@ -77,6 +77,26 @@ export function applyFontScale(n: number) {
   document.documentElement.style.setProperty("--font-scale", String(n));
 }
 
+// ── Plasma-signal strip (every tab): which traces to plot + whether it's open ──
+// Global (not per shot) and persisted, so Ip/Bt/κ stay up as the user switches
+// shots and tabs. Names missing from a shot are simply reported by the strip.
+const TRACE_SIGNALS_KEY = "magnetics-trace-signals";
+const TRACE_OPEN_KEY = "magnetics-trace-open";
+export const DEFAULT_TRACE_SIGNALS = ["ip", "bt", "kappa"];
+function loadTraceSignals(): string[] {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(TRACE_SIGNALS_KEY) ?? "null");
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v;
+  } catch { /* unavailable/corrupt storage → defaults */ }
+  return DEFAULT_TRACE_SIGNALS;
+}
+function saveTrace(key: string, value: unknown) {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* best effort */ }
+}
+function loadTraceOpen(): boolean {
+  try { return window.localStorage.getItem(TRACE_OPEN_KEY) !== "false"; } catch { return true; }
+}
+
 // ── Per-shot plot annotations (Compare view) ────────────────────────────────
 // Keyed by machine id, persisted as JSON. Every read is validated (parseAnnotations)
 // and storage failures are swallowed — annotations are a convenience, never fatal.
@@ -126,6 +146,8 @@ interface State {
   rotParams: { spec: Record<string, number>; mode: Record<string, number> } | null;
   qsParams: Record<string, string> | null;
   annotations: Record<string, Annotation[]>; // keyed by machine id
+  traceSignals: string[]; // plasma-signal strip selection (every tab)
+  traceOpen: boolean;
 
   init: () => Promise<void>;
   removeMachine: (id: string) => Promise<void>;
@@ -143,6 +165,8 @@ interface State {
   updateAnnotation: (machine: string, id: string, patch: AnnotationPatch) => void;
   removeAnnotation: (machine: string, id: string) => void;
   setAnnotations: (machine: string, list: Annotation[]) => void;
+  setTraceSignals: (names: string[]) => void;
+  setTraceOpen: (open: boolean) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -166,6 +190,8 @@ export const useStore = create<State>((set) => ({
   rotParams: null,
   qsParams: null,
   annotations: loadAnnotations(),
+  traceSignals: typeof window === "undefined" ? DEFAULT_TRACE_SIGNALS : loadTraceSignals(),
+  traceOpen: typeof window === "undefined" ? true : loadTraceOpen(),
 
   async init() {
     // fetchDevices() guards its own errors and returns [] (no live backend / no
@@ -216,6 +242,14 @@ export const useStore = create<State>((set) => ({
   removeAnnotation: (machine, id) =>
     set((s) => withAnnotations(s, machine, (s.annotations[machine] ?? []).filter((a) => a.id !== id))),
   setAnnotations: (machine, list) => set((s) => withAnnotations(s, machine, list)),
+  setTraceSignals: (names) => {
+    saveTrace(TRACE_SIGNALS_KEY, names);
+    set({ traceSignals: names });
+  },
+  setTraceOpen: (open) => {
+    saveTrace(TRACE_OPEN_KEY, open);
+    set({ traceOpen: open });
+  },
   setFetchCreds: (patch) => set((s) => ({ fetchCreds: { ...s.fetchCreds, ...patch } })),
   toggleTheme: () =>
     set((s) => {

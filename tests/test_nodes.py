@@ -311,6 +311,24 @@ def test_extra_signals_serves_found_and_reports_missing():
     assert len(node["series"][0]["x"]) == len(node["series"][0]["y"])
 
 
+def test_extra_signals_lists_available_channels_by_kind():
+    """With no `signals`, the node is just the listing the plasma-signal strip offers:
+    every channel in the file, grouped plasma / coil / sensor, with no series."""
+    from magnetics.data import h5source
+
+    shot = _first_shot()
+    node = nodes.build_node(shot, "extra_signals")
+    assert node["series"] == []
+    groups = node["meta"]["available"]
+    assert set(groups) == {"plasma", "coil", "sensor"}
+    assert sorted(sum(groups.values(), [])) == sorted(h5source.channel_names(shot))
+    if "ip" in h5source.channel_names(shot):
+        assert "ip" in groups["plasma"]
+        assert nodes.build_node(shot, "extra_signals", {"signals": "ip"})["meta"]["units"] == {
+            "ip": "A"
+        }
+
+
 def test_quality_for_k_thresholds():
     # mirrors contract.ts qualityForK
     assert contracts.quality_for_k(5) == "good"

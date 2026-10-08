@@ -10,6 +10,7 @@ import { useStore, type TabId } from "./store";
 import { usingLiveBackend } from "./lib/api";
 import SettingsMenu from "./components/SettingsMenu";
 import PullControl from "./components/PullControl";
+import PlasmaSignals from "./components/PlasmaSignals";
 import ErrorBoundary from "./components/ErrorBoundary";
 import SensorsTab from "./components/tabs/SensorsTab";
 import QuasiStationaryTab from "./components/tabs/QuasiStationaryTab";
@@ -176,6 +177,12 @@ export default function App() {
             </button>
           ))}
         </div>
+        {/* Ip / Bt / κ / any channel, on every tab (needs the live backend) */}
+        {machine && !mock && (
+          <ErrorBoundary resetKeys={[machine]} label="The plasma-signal strip">
+            <PlasmaSignals machine={machine} />
+          </ErrorBoundary>
+        )}
         {!machine ? (
           <div className="placeholder">No machine selected.</div>
         ) : (

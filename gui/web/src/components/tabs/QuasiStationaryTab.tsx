@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type Plotly from "plotly.js-dist-min";
 import { useStore } from "../../store";
-import { apiBase, startFetch, usingLiveBackend } from "../../lib/api";
+import { CREDS_HINT, POINTNAME_RE, splitSignalNames, useSignalFetch } from "../../lib/useSignalFetch";
 import { useNode } from "../../lib/useNode";
 import NodeView from "../../lib/NodeView";
 import Plot from "../../lib/Plot";
@@ -19,14 +19,6 @@ import {
 // the user can still see where the deselected/broken probes sit.
 const EXCLUDED_LINE = { color: "#888", width: 1, dash: "dot" as const };
 
-// A valid PTDATA pointname (DIII-D custom-signal entry): letters/digits/underscore,
-// e.g. `Ip`, `betan`, `bt`, `MPI66M020D`. Anything else is rejected before fetch.
-const POINTNAME_RE = /^[A-Za-z0-9_]+$/;
-
-// Shown when a fetch is attempted (or would stall) without the left-rail credentials.
-const CREDS_HINT =
-  "Enter your username in the left “Pull a shot” panel (plus password/Duo if your "
-  + "account needs them) to fetch new signals.";
 
 // ── Hooks & helpers ───────────────────────────────────────────────────
 // Plotly chrome (axis colors, base font) is themed identically by the shared
@@ -296,15 +288,12 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   const svdCondNode   = svdCondRaw?.kind   === "line" ? (svdCondRaw   as LineNode) : null;
 
   // ── Custom user signals (Ip, Dα, …): fetch → merge into the h5 → plot ─────
-  const fetchCreds = useStore((s) => s.fetchCreds);
-  const device = useStore((s) => s.device);
   const [customText, setCustomText]     = useState("");            // entry box (persisted)
   const [committedSignals, setCommittedSignals] = useState("");    // comma list, drives the node
-  const [customBusy, setCustomBusy]     = useState(false);
-  const [customFrac, setCustomFrac]     = useState(0);
-  const [customMsg, setCustomMsg]       = useState<string | null>(null);
-  const customEsRef = useRef<EventSource | null>(null);
-  useEffect(() => () => customEsRef.current?.close(), []);  // close stream on unmount
+  const onCustomFetched = useCallback((names: string[]) => setCommittedSignals(names.join(",")), []);
+  const {
+    busy: customBusy, frac: customFrac, msg: customMsg, credsMissing, fetchSignals,
+  } = useSignalFetch(machine, onCustomFetched);
 
   // ── Channel checkboxes for signal conditioning ────────────────────
   const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set());
@@ -342,7 +331,7 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   // fetch and are surfaced to the user; "not found" (a valid but absent pointname)
   // is a separate, server-side signal reported via extraMissing.
   const customTokens = useMemo(
-    () => customText.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
+    () => splitSignalNames(customText),
     [customText],
   );
   const invalidTokens = useMemo(
@@ -351,75 +340,10 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   );
   const customValid = customTokens.length > 0 && invalidTokens.length === 0;
 
-  // Fetching new data needs the same backend + credentials as the left-rail pull.
-  // remote/mdsthin both require a GA username (password/Duo too unless key auth) —
-  // without it the cluster job hangs at 0%, so we block up-front with a clear hint.
-  const needsCreds = fetchCreds.backend === "remote" || fetchCreds.backend === "mdsthin";
-  const credsMissing = needsCreds && !fetchCreds.username.trim();
-
-  const plotCustomSignals = useCallback(() => {
-    const names = customText.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-    if (!names.length || names.some(n => !POINTNAME_RE.test(n))) return;
-    if (!usingLiveBackend()) { setCustomMsg("✗ no live backend configured — run the packaged app or set VITE_API_BASE"); return; }
-    if (credsMissing) { setCustomMsg(`✗ ${CREDS_HINT}`); return; }
-    setCustomBusy(true); setCustomFrac(0); setCustomMsg("fetching…");
-    void (async () => {
-      try {
-        const { job_id } = await startFetch({
-          shot: Number(machine),
-          signals: names,
-          backend: fetchCreds.backend,
-          username: fetchCreds.username || undefined,
-          password: fetchCreds.password || undefined,
-          duo: fetchCreds.duoMode === "push" ? "1" : fetchCreds.duoPasscode || undefined,
-          device: device || undefined,
-        });
-        customEsRef.current?.close();
-        const es = new EventSource(`${apiBase()}/api/fetch/${job_id}/stream`);
-        customEsRef.current = es;
-        // Watchdog: if the job never moves off 0% it is almost always a stuck
-        // login (missing/incorrect password or an unanswered Duo push). Surface a
-        // credentials hint instead of an eternal 0% spinner. Held in a const box so
-        // `close` can clear it without a use-before-assign dance.
-        const timer: { id?: ReturnType<typeof setTimeout> } = {};
-        const close = () => {
-          clearTimeout(timer.id);
-          es.close();
-          if (customEsRef.current === es) customEsRef.current = null;
-        };
-        let moved = false;
-        timer.id = setTimeout(() => {
-          close();
-          setCustomMsg(`✗ no progress after 30s — likely a login issue. ${CREDS_HINT}`);
-          setCustomBusy(false);
-        }, 30000);
-        es.onmessage = (e: MessageEvent) => {
-          const f = JSON.parse(e.data as string);
-          setCustomFrac(f.progress ?? 0);
-          setCustomMsg(f.msg ?? null);
-          if (!moved && (f.progress ?? 0) > 0) { moved = true; clearTimeout(timer.id); }
-          if (f.status === "done") {
-            close();
-            setCommittedSignals(names.join(","));  // triggers the extra_signals node fetch
-            setCustomMsg(`✓ fetched ${names.length} signal(s)`);
-            setCustomBusy(false);
-          } else if (f.status === "error") {
-            close();
-            setCustomMsg(`✗ ${f.error}`);
-            setCustomBusy(false);
-          }
-        };
-        es.onerror = () => {
-          close();
-          setCustomMsg("✗ progress stream lost (the pull may still be running)");
-          setCustomBusy(false);
-        };
-      } catch (e) {
-        setCustomMsg(String(e));
-        setCustomBusy(false);
-      }
-    })();
-  }, [customText, machine, device, fetchCreds, credsMissing]);
+  const plotCustomSignals = useCallback(
+    () => fetchSignals(splitSignalNames(customText)),
+    [fetchSignals, customText],
+  );
 
   const phiTimePlot = phiTimeNode?.kind === "contour" ? (phiTimeNode as ContourNode) : null;
 
