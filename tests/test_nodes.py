@@ -175,15 +175,17 @@ def test_mode_over_time_node():
     assert n["meta"].get("dominant_n") is not None
 
 
-def test_mode_amplitude_node_matches_n_of_t():
-    # amplitude(t) of the strongest mode: same ridge slices as n(t), finite and >= 0
+def test_mode_amplitude_node_one_trace_per_n():
+    # amplitude(t) per |n| = 0…5: same slices as n(t); values >= 0 or null (gap)
     shot = _first_shot()
     n = nodes.build_node(shot, "mode_amplitude")
     assert n["kind"] == "line"
-    s = n["series"][0]
-    assert len(s["x"]) == len(s["y"]) and len(s["x"]) > 0
-    assert all(y >= 0.0 and y == y for y in s["y"])
-    assert s["x"] == nodes.build_node(shot, "mode_over_time")["series"][0]["x"]
+    assert [s["name"] for s in n["series"]] == [f"n={k}" for k in range(6)]
+    x = nodes.build_node(shot, "mode_over_time")["series"][0]["x"]
+    for s in n["series"]:
+        assert s["x"] == x and len(s["y"]) == len(x)
+        assert all(y is None or y >= 0.0 for y in s["y"])
+    assert any(y is not None for s in n["series"] for y in s["y"])
 
 
 def test_mode_number_amp_pct_knob_widens_visible_cells():

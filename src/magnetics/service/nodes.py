@@ -165,6 +165,7 @@ def refresh() -> None:
         _array_spectrum,
         _array_mode_spec,
         _ridge_track,
+        _amplitude_by_n,
         _qs_run,
         _dev_geom,
         _real_theta,  # channel→θ map derives from channel_names: stale after a re-pull
@@ -1380,26 +1381,46 @@ def _mode_over_time(shot, params=None) -> dict:
     )
 
 
-# ── mode_amplitude: rotating-mode amplitude vs time (same ridge as n(t)) ─────
+# ── mode_amplitude: rotating-mode amplitude vs time, one trace per |n| ───────
+@lru_cache(maxsize=4)
+def _amplitude_by_n(shot, n_slices):
+    """Per-|n| amplitude track over the same active window and slices as the ridge
+    track (so it lines up with n(t)); cached alongside it. Returns (result, n_probes)."""
+    arr = _toroidal_arr(str(shot))
+    phis = np.array([p for _, p in arr], dtype=float)
+    spec = _array_spectrum(str(shot), tuple(n for n, _ in arr))
+    t_lo, t_hi = mode_shape.active_time_window(spec)
+    res = mode_shape.mode_amplitude_by_n(spec, phis, n_slices=n_slices, t_range=(t_lo, t_hi))
+    return res, len(arr)
+
+
 def _mode_amplitude(shot, params=None) -> dict:
-    """Amplitude of the strongest in-band rotating mode vs time: the toroidal-array
-    STFT magnitude |δḂp| at each slice's ridge frequency, averaged over probes. Same
-    slices and ridge as ``mode_over_time``, so the two traces line up point for point."""
-    tr, t_win, n_probes = _ridge_track(str(shot), _i(params, "n_slices", 300))
+    """Rotating-mode amplitude vs time for each toroidal |n| (0…5): the probe-averaged
+    STFT magnitude |δḂp| of the strongest in-band cell whose best-fit n is ±n. Each
+    (t, f) cell counts toward only its own n, so a strong n=1 doesn't echo into n=2;
+    gaps (null) mark times where an |n| owns no cell. Same slices as ``mode_over_time``."""
+    res, n_probes = _amplitude_by_n(str(shot), _i(params, "n_slices", 300))
+    t = res.t_ms.tolist()
+
+    def _nulls(row):
+        return [None if not np.isfinite(v) else float(v) for v in row]
+
     series = [
-        {
-            "name": "mode amplitude (strongest mode)",
-            "x": tr.t_ms.tolist(),
-            "y": (tr.amplitude / max(n_probes, 1)).tolist(),
-        }
+        {"name": f"n={int(n)}", "x": t, "y": _nulls(res.amplitude[i])}
+        for i, n in enumerate(res.abs_n)
     ]
     return contracts.line(
         series,
         {"x": "time (ms)", "y": "mean probe |δḂp| (arb.)"},
         meta={
-            **_ridge_meta(shot, tr, t_win, n_probes),
-            "note": "probe-averaged STFT magnitude of dBp/dt at the strongest in-band "
-            "frequency per slice (the n(t) ridge)",
+            "abs_n": [int(n) for n in res.abs_n],
+            "freq_kHz": [_nulls(np.round(r, 2)) for r in res.freq_khz],
+            "n_probes": n_probes,
+            "n_slices": int(res.t_ms.size),
+            "shot": str(shot),
+            "legend_title": "|n|",
+            "note": "per-|n| probe-averaged STFT magnitude of dBp/dt at that n's strongest "
+            "in-band frequency; each (t, f) cell counts only toward its best-fit n",
         },
     )
 
