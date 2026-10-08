@@ -13,6 +13,7 @@ import {
   ROT_DEFAULTS,
 } from "../../lib/rotatingTransforms";
 import { lineTraces, spectrogramTrace } from "../../lib/plotTraces";
+import { withFlattopCut } from "../../lib/flattop";
 import { resetTimeRangeOnDoubleClick, sharedXAxis, timeRangeFromRelayout } from "../../lib/timeRange";
 
 // Offline synthetic-demo constants. These were formerly user-facing knobs (PEST λ and
@@ -180,10 +181,15 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // Gaussian pre-smoothing are folded into these params by rotFetchParams — see there.
   // The Power Gate slider is a percentile floor: keep cells ≥ the p-th percentile of each
   // frequency's power over time (power_floor_k=1 × that percentile).
-  const { spec: specParams, mode: modeParams } = rotFetchParams({
+  const rawRot = rotFetchParams({
     specSliceMs, fmin, fmax, smoothing, coherenceMin, powerGate, nGate,
     smoothOn, smoothTcells, smoothFcells,
   });
+  // Optional analysis cut-off at the Ip flattop end (global toggle in the strip).
+  const cutFlattop = useStore((s) => s.cutFlattop);
+  const specParams = withFlattopCut(rawRot.spec, cutFlattop);
+  const modeParams = withFlattopCut(rawRot.mode, cutFlattop);
+  const trackParams = withFlattopCut({}, cutFlattop);
 
   // Fetch main spectrogram node (real log-power Ḃp(t,f) from the live backend)
   const {
@@ -245,18 +251,18 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // Cursor-independent (reference is the strongest-mode slice), so no time param.
   const {
     node: modeTrackNode,
-  } = useNode(machine, "mode_track");
+  } = useNode(machine, "mode_track", trackParams);
 
   // Fetch the best-fit toroidal mode number n(t) over the shot (appears/persists/locks).
   // Cursor-independent (global dominant frequency), so no time param.
   const {
     node: modeOverTimeNode,
-  } = useNode(machine, "mode_over_time");
+  } = useNode(machine, "mode_over_time", trackParams);
 
   // Amplitude of that same strongest mode vs time (same ridge slices as n(t)).
   const {
     node: modeAmplitudeNode,
-  } = useNode(machine, "mode_amplitude");
+  } = useNode(machine, "mode_amplitude", trackParams);
 
   // Array wave-stripes: raw δBp(φ,t) / δBp(θ,t) over a few mode periods at the cursor.
   const { node: toroidalStripesNode } = useNode(machine, "toroidal_stripes", { time: cursorMs });

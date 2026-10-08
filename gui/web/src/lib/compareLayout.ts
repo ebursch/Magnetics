@@ -130,3 +130,28 @@ export function panelForAxis(axisOf: Partial<Record<PanelId, string>>, yaxis: st
   for (const [panel, ax] of Object.entries(axisOf)) if (ax === id) return panel as PanelId;
   return null;
 }
+
+// ── User panel order (Compare "reorder") ─────────────────────────────
+// `order` is the user's saved top→bottom sequence of panel ids. Panels it doesn't
+// mention (never reordered, or new — e.g. a newly selected plasma signal) keep their
+// default relative order and go after the ordered ones.
+
+/** `ids` (default order) re-sorted by the user's `order`. */
+export function orderPanels<T extends string>(ids: T[], order: string[]): T[] {
+  const rank = (id: T, i: number) => {
+    const k = order.indexOf(id);
+    return k >= 0 ? k : order.length + i;
+  };
+  return ids.map((id, i) => [id, rank(id, i)] as const).sort((a, b) => a[1] - b[1]).map(([id]) => id);
+}
+
+/** New saved order after moving `id` to position `to` among the `shown` panels
+ *  (already in display order). Hidden panels keep their saved slots at the end so
+ *  they return where they were when re-enabled. */
+export function movePanel(shown: string[], order: string[], id: string, to: number): string[] {
+  const from = shown.indexOf(id);
+  if (from < 0) return order;
+  const next = shown.filter((p) => p !== id);
+  next.splice(Math.max(0, Math.min(next.length, to)), 0, id);
+  return [...next, ...order.filter((p) => !next.includes(p))];
+}

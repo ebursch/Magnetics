@@ -1,5 +1,7 @@
-import { expect, test } from "vitest";
-import { axisId, buildCompareFigure, panelDomains, panelForAxis, timeExtents, type PanelSpec } from "./compareLayout";
+import { describe, expect, it, test } from "vitest";
+import {
+  axisId, buildCompareFigure, movePanel, orderPanels, panelDomains, panelForAxis, timeExtents, type PanelSpec,
+} from "./compareLayout";
 import { PLOT_CHROME } from "./colormaps";
 
 const chrome = PLOT_CHROME.dark;
@@ -61,4 +63,18 @@ test("no xRange → autorange; panelForAxis maps a clicked trace's y axis back t
   expect(panelForAxis(fig.axisOf, axisId(1))).toBe("phase");
   expect(panelForAxis(fig.axisOf, undefined)).toBe("phi_t");
   expect(panelForAxis(fig.axisOf, "y9")).toBeNull();
+});
+
+describe("panel reordering", () => {
+  it("sorts by the saved order, unknown panels after in default order", () => {
+    expect(orderPanels(["a", "b", "c", "d"], ["c", "a"])).toEqual(["c", "a", "b", "d"]);
+    expect(orderPanels(["a", "b"], [])).toEqual(["a", "b"]);
+  });
+  it("moves a panel and keeps hidden panels' saved slots", () => {
+    const order = movePanel(["a", "b", "c"], ["x", "a"], "c", 0);
+    expect(order).toEqual(["c", "a", "b", "x"]);
+    expect(orderPanels(["a", "b", "c", "x"], order)).toEqual(["c", "a", "b", "x"]);
+    expect(movePanel(["a", "b", "c"], [], "a", 99)).toEqual(["b", "c", "a"]);
+    expect(movePanel(["a"], ["a"], "zz", 0)).toEqual(["a"]);
+  });
 });

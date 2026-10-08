@@ -34,6 +34,8 @@ export default function PlasmaSignals({ machine, plot = true }: { machine: strin
   const cursorMs = useStore((s) => s.cursorMs);
   const setCursorMs = useStore((s) => s.setCursorMs);
   const timeRange = useStore((s) => s.timeRange);
+  const cutFlattop = useStore((s) => s.cutFlattop);
+  const setCutFlattop = useStore((s) => s.setCutFlattop);
   const setTimeRange = useStore((s) => s.setTimeRange);
   const selected = useStore((s) => s.traceSignals);
   const setSelected = useStore((s) => s.setTraceSignals);
@@ -53,6 +55,7 @@ export default function PlasmaSignals({ machine, plot = true }: { machine: strin
   );
   const units = useMemo(() => (line?.meta?.units as Record<string, string> | undefined) ?? {}, [line]);
   const missing = (line?.meta?.missing as string[] | undefined) ?? [];
+  const flattop = (line?.meta?.flattop_ms as [number, number] | null | undefined) ?? null;
   const inFile = useMemo(
     () => new Set([...groups.plasma, ...groups.coil, ...groups.sensor]),
     [groups.plasma, groups.coil, groups.sensor],
@@ -115,13 +118,24 @@ export default function PlasmaSignals({ machine, plot = true }: { machine: strin
     // at 0 ms, which would otherwise stretch the axis back to t=0.
     const xs = series.flatMap((s) => (s.x.length ? [s.x[0], s.x[s.x.length - 1]] : []));
     const inSpan = xs.length > 0 && cursorMs >= Math.min(...xs) && cursorMs <= Math.max(...xs);
-    layout.shapes = inSpan
+    const shapes: Record<string, unknown>[] = inSpan
       ? [{ type: "line", xref: "x", yref: "paper", x0: cursorMs, x1: cursorMs, y0: 0, y1: 1,
            line: { color: accent, width: 1.5, dash: "dash" } }]
       : [];
+    // Analysis cut-off at the Ip flattop end: shade what the analyses now leave out.
+    if (cutFlattop && flattop && xs.length) {
+      const tEnd = Math.max(...xs);
+      shapes.push(
+        { type: "rect", xref: "x", yref: "paper", x0: flattop[1], x1: Math.max(tEnd, flattop[1]), y0: 0, y1: 1,
+          fillcolor: "rgba(128,128,128,0.18)", line: { width: 0 }, layer: "below" },
+        { type: "line", xref: "x", yref: "paper", x0: flattop[1], x1: flattop[1], y0: 0, y1: 1,
+          line: { color: "#e0533d", width: 1.2 } },
+      );
+    }
+    layout.shapes = shapes;
     layout.uirevision = `${machine}:${series.map((s) => s.name).join(",")}`;
     return { data, layout: layout as Partial<Plotly.Layout>, n };
-  }, [line, units, cursorMs, theme, machine, timeRange]);
+  }, [line, units, cursorMs, theme, machine, timeRange, cutFlattop, flattop]);
 
   const onRelayout = useCallback((e: Record<string, unknown>) => {
     const r = timeRangeFromRelayout(e);
@@ -165,6 +179,14 @@ export default function PlasmaSignals({ machine, plot = true }: { machine: strin
         <datalist id="plasma-signal-channels">
           {extraChannels.map((n) => <option key={n} value={n} />)}
         </datalist>
+        <label className="cmp-check" style={{ fontSize: 11, color: flattop ? "var(--text)" : "var(--text-dim)" }}
+          title={flattop
+            ? `Ip flattop ${Math.round(flattop[0])}–${Math.round(flattop[1])} ms (smoothed |Ip| ≥ 95 % of peak). When on, every analysis — QS fit, rotating maps and tracks — stops at the flattop end.`
+            : "No Ip trace in this shot — can't find the flattop"}>
+          <input type="checkbox" checked={cutFlattop} disabled={!flattop}
+            onChange={(e) => setCutFlattop(e.target.checked)} />
+          stop analysis at Ip flattop end{flattop ? ` (${Math.round(flattop[1])} ms)` : ""}
+        </label>
         {timeRange && (
           <button type="button" onClick={() => setTimeRange(null)}
             title="Reset the shared time axis (every tab) to the full range"

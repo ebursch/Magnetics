@@ -13,6 +13,7 @@ import Plot from "../../lib/Plot";
 import type { ContourNode, HeatmapNode, LineNode, Node } from "../../lib/contract";
 import { MODE_PALETTE, plotChrome } from "../../lib/colormaps";
 import { displayScale, signalAxisTitle } from "../../lib/signalUnits";
+import { withFlattopCut } from "../../lib/flattop";
 import { resetTimeRangeOnDoubleClick, timeRangeFromRelayout } from "../../lib/timeRange";
 import { LINE_PALETTE, QS_MODE_PALETTE, lineTraces, phiTimeTraces, spectrogramTrace } from "../../lib/plotTraces";
 import { QS_DEFAULTS, phiPeak } from "../../lib/qsTransforms";
@@ -21,7 +22,9 @@ import {
   ANNOTATION_COLORS, DEFAULT_COLOR, annotationsToPlotly, parseAnnotations,
   type Annotation, type AnnotationInput, type AnnotationKind, type AnnotationPatch, type FixedPanelId, type PanelId,
 } from "../../lib/annotations";
-import { buildCompareFigure, panelForAxis, timeExtents, type PanelSpec } from "../../lib/compareLayout";
+import {
+  buildCompareFigure, movePanel, orderPanels, panelForAxis, timeExtents, type PanelSpec,
+} from "../../lib/compareLayout";
 
 const PANEL_LABEL: Record<FixedPanelId, string> = {
   spec: "Spectrogram",
@@ -52,6 +55,18 @@ const CLICK_MODES: { id: ClickMode; label: string; hint: string }[] = [
 ];
 const KIND_LABEL: Record<AnnotationKind, string> = { vline: "V-line", span: "Span", hline: "H-line", point: "Point" };
 
+// The user's top→bottom panel order, kept per browser (a layout preference, not data).
+const ORDER_KEY = "magnetics-compare-order";
+function loadOrder(): string[] {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(ORDER_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch { return []; }
+}
+function saveOrder(order: string[]) {
+  try { window.localStorage.setItem(ORDER_KEY, JSON.stringify(order)); } catch { /* best effort */ }
+}
+
 const errText = (e: string | null) => e?.replace(/^Error:\s*fetch failed \(\d+\):\s*/, "") ?? null;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const r4 = (v: number) => Number(v.toPrecision(4));
@@ -73,6 +88,9 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   // Plasma signals (the strip's selection: Ip, Bt, κ, …) as panels on the shared axis.
   const traceSignals = useStore((s) => s.traceSignals);
   const [showSignals, setShowSignals] = useState(true);
+  const [order, setOrderState] = useState<string[]>(loadOrder);
+  const setOrder = useCallback((o: string[]) => { setOrderState(o); saveOrder(o); }, []);
+  const [dragId, setDragId] = useState<PanelId | null>(null);
   const [specMode, setSpecMode] = useState<"n" | "power">("n");
   const [clickMode, setClickMode] = useState<ClickMode>("cursor");
   const [pendingSpan, setPendingSpan] = useState<number | null>(null);
@@ -89,14 +107,20 @@ export default function ComparisonTab({ machine }: { machine: string }) {
     });
 
   // ── Data — only enabled panels fetch (a null machine suppresses useNode) ──
-  const rot = useMemo(() => rotParams ?? rotFetchParams(ROT_DEFAULTS), [rotParams]);
-  const qs = useMemo<Record<string, string>>(() => qsParams ?? { ...QS_DEFAULTS }, [qsParams]);
+  const cutFlattop = useStore((s) => s.cutFlattop);
+  const rot = useMemo(() => {
+    const r = rotParams ?? rotFetchParams(ROT_DEFAULTS);
+    return { spec: withFlattopCut(r.spec, cutFlattop), mode: withFlattopCut(r.mode, cutFlattop) };
+  }, [rotParams, cutFlattop]);
+  const qs = useMemo(() => withFlattopCut<Record<string, string | number>>(qsParams ?? { ...QS_DEFAULTS }, cutFlattop),
+    [qsParams, cutFlattop]);
+  const trackParams = useMemo(() => withFlattopCut({}, cutFlattop), [cutFlattop]);
   const m = (p: FixedPanelId, cond = true) => (on(p) && cond ? machine : null);
 
   const spec = useNode(m("spec", specMode === "power"), "spectrogram", rot.spec);
   const modeNum = useNode(m("spec", specMode === "n"), "mode_number", rot.mode);
-  const modeOverTime = useNode(m("mode_over_time"), "mode_over_time");
-  const modeAmp = useNode(m("mode_amplitude"), "mode_amplitude");
+  const modeOverTime = useNode(m("mode_over_time"), "mode_over_time", trackParams);
+  const modeAmp = useNode(m("mode_amplitude"), "mode_amplitude", trackParams);
   const phiT = useNode(m("phi_t"), "phi_t", qs);
   const amp = useNode(m("amplitude"), "amplitude", qs);
   const phase = useNode(m("phase"), "phase_t", qs);
@@ -175,9 +199,13 @@ export default function ComparisonTab({ machine }: { machine: string }) {
         });
       });
     }
-    return out;
+    // User order (drag / ‹ › in the "Order" row); unknown panels keep default order after.
+    const byId = new Map(out.map((p) => [p.id, p]));
+    return orderPanels(out.map((p) => p.id), order).map((id) => byId.get(id)!);
   }, [panels, specRes.node, specMode, modeOverTime.node, modeAmp.node, phiT.node, amp.node, phase.node, rot,
-    showSignals, sigs.node]);
+    showSignals, sigs.node, order]);
+  const shownIds = panelSpecs.map((p) => p.id);
+  const move = (id: PanelId, to: number) => setOrder(movePanel(shownIds, order, id, to));
 
   const extents = useMemo(
     () => timeExtents(panelSpecs.flatMap((p) => p.traces.map((t) => t.x as number[] | undefined))),
@@ -290,6 +318,37 @@ export default function ComparisonTab({ machine }: { machine: string }) {
             onClick={() => setSpecMode("power")}>Log Power</button>
         </div>
       </div>
+
+      {shownIds.length > 1 && (
+        <div className="cmp-toolbar" aria-label="Panel order">
+          <span className="metrics-title" title="Drag a panel (or use ‹ ›) to change its place in the stack, top → bottom">
+            Order ↓
+          </span>
+          {shownIds.map((id, i) => (
+            <span key={id} draggable
+              onDragStart={(e) => { setDragId(id); e.dataTransfer.effectAllowed = "move"; }}
+              onDragEnd={() => setDragId(null)}
+              onDragOver={(e) => { if (dragId) e.preventDefault(); }}
+              onDrop={(e) => { e.preventDefault(); if (dragId && dragId !== id) move(dragId, i); setDragId(null); }}
+              className="seg-btn" data-panel={id}
+              style={{ display: "inline-flex", alignItems: "center", gap: 2, cursor: "grab",
+                opacity: dragId === id ? 0.4 : 1, outline: dragId && dragId !== id ? "1px dashed var(--border)" : "none" }}>
+              <button type="button" aria-label={`Move ${panelLabel(id)} up`} disabled={i === 0}
+                onClick={() => move(id, i - 1)}
+                style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: "0 2px" }}>‹</button>
+              {panelLabel(id)}
+              <button type="button" aria-label={`Move ${panelLabel(id)} down`} disabled={i === shownIds.length - 1}
+                onClick={() => move(id, i + 1)}
+                style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: "0 2px" }}>›</button>
+            </span>
+          ))}
+          {order.length > 0 && (
+            <button type="button" className="seg-btn" onClick={() => setOrder([])} title="Back to the default order">
+              Reset order
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="cmp-toolbar">
         <span className="metrics-title">Click to add</span>

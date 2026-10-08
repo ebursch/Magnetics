@@ -152,6 +152,7 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
 
   // ── Deferred fetch: only compute when user clicks Plot ────────────
   const [committedParams, setCommittedParams] = useState<Record<string, string> | null>(null);
+  const cutFlattop = useStore((s) => s.cutFlattop);
   // Bumped on every Plot click so an IDENTICAL param set still re-runs the fetch —
   // without it a transient failure was unrecoverable except by jiggling a setting.
   const [plotNonce, setPlotNonce] = useState(0);
@@ -174,14 +175,24 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
     }
     if (tminMs) p.tmin_ms = tminMs;
     if (tmaxMs) p.tmax_ms = tmaxMs;
+    if (cutFlattop) p.cut_flattop = "1"; // backend clamps the fit window to the Ip flattop
     // Sorted so the param string is stable (identical exclusion set → same fetch key).
     const excl = Array.from(excludedChannels).sort().join(",");
     if (excl) p.fit_exclude = excl;
     return p;
   }, [
     ns, ms, channelFilter, detrendType, detrendLo, detrendHi, tminMs, tmaxMs,
-    uncertainty, energyFraction, fitBasis, fitCond, cutoffLo, cutoffHi, excludedChannels,
+    uncertainty, energyFraction, fitBasis, fitCond, cutoffLo, cutoffHi, excludedChannels, cutFlattop,
   ]);
+
+  // Toggling the flattop cut-off (strip, any tab) refits right away rather than just
+  // flagging the Plot button — it's a global analysis switch, not a QS-tab setting.
+  const cutRef = useRef(cutFlattop);
+  useEffect(() => {
+    if (cutRef.current === cutFlattop) return;
+    cutRef.current = cutFlattop;
+    setCommittedParams((prev) => (prev ? qsParams : prev));
+  }, [cutFlattop, qsParams]);
 
 
   // Linked time-axis zoom — the GLOBAL shared time axis (plasma-signal strip, rotating,

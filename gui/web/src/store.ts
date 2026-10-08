@@ -82,6 +82,10 @@ export function applyFontScale(n: number) {
 // shots and tabs. Names missing from a shot are simply reported by the strip.
 const TRACE_SIGNALS_KEY = "magnetics-trace-signals";
 const TRACE_OPEN_KEY = "magnetics-trace-open";
+const CUT_FLATTOP_KEY = "magnetics-cut-flattop";
+function loadCutFlattop(): boolean {
+  try { return window.localStorage.getItem(CUT_FLATTOP_KEY) === "true"; } catch { return false; }
+}
 export const DEFAULT_TRACE_SIGNALS = ["ip", "bt", "kappa"];
 function loadTraceSignals(): string[] {
   try {
@@ -151,6 +155,7 @@ interface State {
   annotations: Record<string, Annotation[]>; // keyed by machine id
   traceSignals: string[]; // plasma-signal strip selection (every tab)
   traceOpen: boolean;
+  cutFlattop: boolean; // stop every analysis at the Ip flattop end (lib/flattop.ts)
 
   init: () => Promise<void>;
   removeMachine: (id: string) => Promise<void>;
@@ -171,6 +176,7 @@ interface State {
   setAnnotations: (machine: string, list: Annotation[]) => void;
   setTraceSignals: (names: string[]) => void;
   setTraceOpen: (open: boolean) => void;
+  setCutFlattop: (on: boolean) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -197,6 +203,7 @@ export const useStore = create<State>((set) => ({
   annotations: loadAnnotations(),
   traceSignals: typeof window === "undefined" ? DEFAULT_TRACE_SIGNALS : loadTraceSignals(),
   traceOpen: typeof window === "undefined" ? true : loadTraceOpen(),
+  cutFlattop: typeof window === "undefined" ? false : loadCutFlattop(),
 
   async init() {
     // fetchDevices() guards its own errors and returns [] (no live backend / no
@@ -253,6 +260,10 @@ export const useStore = create<State>((set) => ({
   setTraceSignals: (names) => {
     saveTrace(TRACE_SIGNALS_KEY, names);
     set({ traceSignals: names });
+  },
+  setCutFlattop: (on) => {
+    saveTrace(CUT_FLATTOP_KEY, on);
+    set({ cutFlattop: on });
   },
   setTraceOpen: (open) => {
     saveTrace(TRACE_OPEN_KEY, open);
