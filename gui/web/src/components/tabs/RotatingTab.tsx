@@ -243,6 +243,11 @@ export default function RotatingTab({ machine }: { machine: string }) {
     node: modeOverTimeNode,
   } = useNode(machine, "mode_over_time");
 
+  // Amplitude of that same strongest mode vs time (same ridge slices as n(t)).
+  const {
+    node: modeAmplitudeNode,
+  } = useNode(machine, "mode_amplitude");
+
   // Array wave-stripes: raw δBp(φ,t) / δBp(θ,t) over a few mode periods at the cursor.
   const { node: toroidalStripesNode } = useNode(machine, "toroidal_stripes", { time: cursorMs });
   const { node: poloidalStripesNode } = useNode(machine, "poloidal_stripes", { time: cursorMs });
@@ -1652,6 +1657,11 @@ export default function RotatingTab({ machine }: { machine: string }) {
                   : ""}) · dominant n≈${shapeMeta(modeOverTimeNode)!.dominant_n}`
             : "best-fit toroidal n over time",
           { machine, nodeId: "mode_over_time" })}
+        {analysisCard("Mode Amplitude vs Time", modeAmplitudeNode, "line", 200,
+          shapeMeta(modeAmplitudeNode)?.n_probes != null
+            ? `strongest mode (same ridge as n(t)) · probe-averaged |δḂp| over ${shapeMeta(modeAmplitudeNode)!.n_probes} probes`
+            : "amplitude of the strongest mode over time",
+          { machine, nodeId: "mode_amplitude" })}
       </div>
     </div>
   );

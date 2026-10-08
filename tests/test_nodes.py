@@ -175,6 +175,17 @@ def test_mode_over_time_node():
     assert n["meta"].get("dominant_n") is not None
 
 
+def test_mode_amplitude_node_matches_n_of_t():
+    # amplitude(t) of the strongest mode: same ridge slices as n(t), finite and >= 0
+    shot = _first_shot()
+    n = nodes.build_node(shot, "mode_amplitude")
+    assert n["kind"] == "line"
+    s = n["series"][0]
+    assert len(s["x"]) == len(s["y"]) and len(s["x"]) > 0
+    assert all(y >= 0.0 and y == y for y in s["y"])
+    assert s["x"] == nodes.build_node(shot, "mode_over_time")["series"][0]["x"]
+
+
 def test_mode_number_amp_pct_knob_widens_visible_cells():
     # n_amp_pct is the amplitude-percentile floor: a lower percentile keeps weaker
     # cells, so the n-map shows at least as many as a stricter (higher) floor.

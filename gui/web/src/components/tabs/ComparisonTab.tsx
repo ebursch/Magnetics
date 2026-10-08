@@ -24,15 +24,16 @@ import { buildCompareFigure, panelForAxis, timeExtents, type PanelSpec } from ".
 const PANEL_LABEL: Record<PanelId, string> = {
   spec: "Spectrogram",
   mode_over_time: "n(t)",
+  mode_amplitude: "Mode amplitude",
   phi_t: "δBp(φ, t)",
   amplitude: "QS amplitude",
   phase: "QS phase",
 };
 const PANEL_WEIGHT: Record<PanelId, number> = {
-  spec: 1.5, mode_over_time: 0.7, phi_t: 1.3, amplitude: 0.9, phase: 0.9,
+  spec: 1.5, mode_over_time: 0.7, mode_amplitude: 0.8, phi_t: 1.3, amplitude: 0.9, phase: 0.9,
 };
 // Display order, top → bottom: rotating analyses first, then quasi-stationary.
-const PANEL_ORDER: PanelId[] = ["spec", "mode_over_time", "phi_t", "amplitude", "phase"];
+const PANEL_ORDER: PanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
 const DEFAULT_PANELS: PanelId[] = ["spec", "phi_t", "amplitude", "phase"];
 
 type ClickMode = "cursor" | AnnotationKind;
@@ -85,13 +86,14 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   const spec = useNode(m("spec", specMode === "power"), "spectrogram", rot.spec);
   const modeNum = useNode(m("spec", specMode === "n"), "mode_number", rot.mode);
   const modeOverTime = useNode(m("mode_over_time"), "mode_over_time");
+  const modeAmp = useNode(m("mode_amplitude"), "mode_amplitude");
   const phiT = useNode(m("phi_t"), "phi_t", qs);
   const amp = useNode(m("amplitude"), "amplitude", qs);
   const phase = useNode(m("phase"), "phase_t", qs);
   const specRes = specMode === "n" ? modeNum : spec;
 
   const fetched: Record<PanelId, { node: Node | null; error: string | null; loading: boolean }> = {
-    spec: specRes, mode_over_time: modeOverTime, phi_t: phiT, amplitude: amp, phase,
+    spec: specRes, mode_over_time: modeOverTime, mode_amplitude: modeAmp, phi_t: phiT, amplitude: amp, phase,
   };
 
   // ── Panels → one stacked figure ───────────────────────────────────
@@ -114,6 +116,12 @@ export default function ComparisonTab({ machine }: { machine: string }) {
         out.push({
           id, weight: PANEL_WEIGHT[id], traces: lineTraces(n, { palette: MODE_PALETTE.slice(1) }),
           yaxis: { title: { text: n.axes.y } },
+        });
+      } else if (id === "mode_amplitude" && modeAmp.node?.kind === "line") {
+        const n = modeAmp.node as LineNode;
+        out.push({
+          id, weight: PANEL_WEIGHT[id], traces: lineTraces(n, { palette: MODE_PALETTE.slice(1) }),
+          yaxis: { title: { text: "|δḂp| (arb.)" }, rangemode: "tozero" },
         });
       } else if (id === "phi_t" && phiT.node?.kind === "contour") {
         const n = phiT.node as ContourNode;
@@ -138,7 +146,7 @@ export default function ComparisonTab({ machine }: { machine: string }) {
       }
     }
     return out;
-  }, [panels, specRes.node, specMode, modeOverTime.node, phiT.node, amp.node, phase.node, rot]);
+  }, [panels, specRes.node, specMode, modeOverTime.node, modeAmp.node, phiT.node, amp.node, phase.node, rot]);
 
   const extents = useMemo(
     () => timeExtents(panelSpecs.flatMap((p) => p.traces.map((t) => t.x as number[] | undefined))),

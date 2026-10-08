@@ -164,6 +164,7 @@ def refresh() -> None:
         _stack_cached,
         _array_spectrum,
         _array_mode_spec,
+        _ridge_track,
         _qs_run,
         _dev_geom,
         _real_theta,  # channel→θ map derives from channel_names: stale after a re-pull
@@ -1323,6 +1324,35 @@ def _mode_track(shot, params=None) -> dict:
     )
 
 
+# ── strongest-mode ridge track: shared by n(t) and its amplitude ─────────────
+@lru_cache(maxsize=4)
+def _ridge_track(shot, n_slices):
+    """Strongest in-band mode per time slice (``ridge_track_from_spectrum``) over the
+    active-signal window, cached so the n(t) and amplitude(t) nodes run it once.
+    Returns (ridge, (t_lo, t_hi) s, n_probes)."""
+    arr = _toroidal_arr(str(shot))
+    phis = np.array([p for _, p in arr], dtype=float)
+    spec = _array_spectrum(str(shot), tuple(n for n, _ in arr))
+    t_lo, t_hi = mode_shape.active_time_window(spec)
+    tr = mode_shape.ridge_track_from_spectrum(spec, phis, n_slices=n_slices, t_range=(t_lo, t_hi))
+    return tr, (t_lo, t_hi), len(arr)
+
+
+def _ridge_meta(shot, tr, t_win, n_probes) -> dict:
+    vals, counts = np.unique(tr.n_by_time, return_counts=True)
+    f_lo, f_hi = (
+        (float(np.min(tr.freq_khz)), float(np.max(tr.freq_khz))) if tr.freq_khz.size else (0.0, 0.0)
+    )
+    return {
+        "dominant_n": int(vals[int(counts.argmax())]),
+        "f_range_kHz": [round(f_lo, 1), round(f_hi, 1)],
+        "n_probes": n_probes,
+        "n_slices": int(tr.t_ms.size),
+        "t_window_ms": [round(t_win[0] * 1e3, 1), round(t_win[1] * 1e3, 1)],
+        "shot": str(shot),
+    }
+
+
 # ── mode_over_time: dominant toroidal mode number n(t) over the shot ─────────
 def _mode_over_time(shot, params=None) -> dict:
     """Best-fit toroidal mode number n vs time — the n(t) trace. Each slice fits n at
@@ -1331,16 +1361,7 @@ def _mode_over_time(shot, params=None) -> dict:
     to one global bin while other simultaneous modes go unrepresented. Cursor-independent
     and restricted to the active-signal window. The full (t,f) n-map (``mode_number``)
     is the complete multi-mode view; this is its 1-D strongest-mode summary."""
-    n_slices = _i(params, "n_slices", 300)
-    arr = _toroidal_arr(str(shot))
-    phis = np.array([p for _, p in arr], dtype=float)
-    spec = _array_spectrum(str(shot), tuple(n for n, _ in arr))
-    t_lo, t_hi = mode_shape.active_time_window(spec)
-    tr = mode_shape.ridge_track_from_spectrum(spec, phis, n_slices=n_slices, t_range=(t_lo, t_hi))
-    vals, counts = np.unique(tr.n_by_time, return_counts=True)
-    f_lo, f_hi = (
-        (float(np.min(tr.freq_khz)), float(np.max(tr.freq_khz))) if tr.freq_khz.size else (0.0, 0.0)
-    )
+    tr, t_win, n_probes = _ridge_track(str(shot), _i(params, "n_slices", 300))
     series = [
         {
             "name": "toroidal n (strongest mode)",
@@ -1352,14 +1373,33 @@ def _mode_over_time(shot, params=None) -> dict:
         series,
         {"x": "time (ms)", "y": "toroidal n"},
         meta={
-            "dominant_n": int(vals[int(counts.argmax())]),
-            "f_range_kHz": [round(f_lo, 1), round(f_hi, 1)],
-            "n_probes": len(arr),
-            "n_slices": int(tr.t_ms.size),
-            "t_window_ms": [round(t_lo * 1e3, 1), round(t_hi * 1e3, 1)],
-            "shot": str(shot),
+            **_ridge_meta(shot, tr, t_win, n_probes),
             "note": "best-fit toroidal n of the strongest in-band mode at each time "
             "(frequency follows the ridge); see the n-map for all modes",
+        },
+    )
+
+
+# ── mode_amplitude: rotating-mode amplitude vs time (same ridge as n(t)) ─────
+def _mode_amplitude(shot, params=None) -> dict:
+    """Amplitude of the strongest in-band rotating mode vs time: the toroidal-array
+    STFT magnitude |δḂp| at each slice's ridge frequency, averaged over probes. Same
+    slices and ridge as ``mode_over_time``, so the two traces line up point for point."""
+    tr, t_win, n_probes = _ridge_track(str(shot), _i(params, "n_slices", 300))
+    series = [
+        {
+            "name": "mode amplitude (strongest mode)",
+            "x": tr.t_ms.tolist(),
+            "y": (tr.amplitude / max(n_probes, 1)).tolist(),
+        }
+    ]
+    return contracts.line(
+        series,
+        {"x": "time (ms)", "y": "mean probe |δḂp| (arb.)"},
+        meta={
+            **_ridge_meta(shot, tr, t_win, n_probes),
+            "note": "probe-averaged STFT magnitude of dBp/dt at the strongest in-band "
+            "frequency per slice (the n(t) ridge)",
         },
     )
 
@@ -1723,6 +1763,7 @@ _BUILDERS = {
     "mode_pattern": _mode_pattern,
     "mode_track": _mode_track,
     "mode_over_time": _mode_over_time,
+    "mode_amplitude": _mode_amplitude,
     # rotating array views: raw wave-stripes + poloidal phase fit + raw trace
     "toroidal_stripes": _toroidal_stripes,
     "poloidal_stripes": _poloidal_stripes,

@@ -5,9 +5,9 @@
 import type Plotly from "plotly.js-dist-min";
 
 /** Panels of the Compare figure — the target of a panel-anchored annotation. */
-export type PanelId = "spec" | "mode_over_time" | "phi_t" | "amplitude" | "phase";
+export type PanelId = "spec" | "mode_over_time" | "mode_amplitude" | "phi_t" | "amplitude" | "phase";
 
-export const PANEL_IDS: PanelId[] = ["spec", "mode_over_time", "phi_t", "amplitude", "phase"];
+export const PANEL_IDS: PanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
 
 interface Base {
   id: string;
