@@ -1,7 +1,10 @@
 // Plasma-signal strip — shown above every tab. Plots any channel in the shot file
-// (Ip, Bt, κ, 3D-coil currents, individual probes, …) as stacked time traces on one
-// shared time axis, with the global time cursor; clicking sets the cursor. Names not
-// yet in the file can be fetched (merged into the shot via POST /api/fetch).
+// (Ip, Bt, κ, 3D-coil currents, individual probes, …) as stacked time traces on the
+// global time axis (store.timeRange — zooming here zooms every tab's time plots and
+// vice versa), with the global time cursor; clicking sets the cursor. Names not yet
+// in the file can be fetched (merged into the shot via POST /api/fetch). On the
+// Compare tab (`plot={false}`) only the controls show: the selected signals are
+// drawn as panels inside the Compare figure instead.
 //
 // Data: the `extra_signals` node — one request returns both the selected traces and
 // `meta.available` (every channel in the file, grouped plasma / coil / sensor).
@@ -13,6 +16,7 @@ import Plot from "../lib/Plot";
 import type { LineNode } from "../lib/contract";
 import { LINE_PALETTE } from "../lib/plotTraces";
 import { displayScale, signalAxisTitle } from "../lib/signalUnits";
+import { resetTimeRangeOnDoubleClick, sharedXAxis, timeRangeFromRelayout } from "../lib/timeRange";
 import { CREDS_HINT, POINTNAME_RE, splitSignalNames, useSignalFetch } from "../lib/useSignalFetch";
 
 type Groups = { plasma: string[]; coil: string[]; sensor: string[] };
@@ -25,10 +29,12 @@ const chipStyle = (on: boolean): React.CSSProperties => ({
   color: on ? "#fff" : "var(--text-dim)", border: "1px solid var(--border)",
 });
 
-export default function PlasmaSignals({ machine }: { machine: string }) {
+export default function PlasmaSignals({ machine, plot = true }: { machine: string; plot?: boolean }) {
   const theme = useStore((s) => s.theme);
   const cursorMs = useStore((s) => s.cursorMs);
   const setCursorMs = useStore((s) => s.setCursorMs);
+  const timeRange = useStore((s) => s.timeRange);
+  const setTimeRange = useStore((s) => s.setTimeRange);
   const selected = useStore((s) => s.traceSignals);
   const setSelected = useStore((s) => s.setTraceSignals);
   const open = useStore((s) => s.traceOpen);
@@ -83,7 +89,7 @@ export default function PlasmaSignals({ machine }: { machine: string }) {
     const layout: Record<string, unknown> = {
       showlegend: false,
       margin: { t: 6, b: 30, l: 70, r: 16 },
-      xaxis: { title: { text: "time (ms)" }, anchor: n ? `y${n > 1 ? n : ""}` : "y" },
+      xaxis: { title: { text: "time (ms)" }, anchor: n ? `y${n > 1 ? n : ""}` : "y", ...sharedXAxis(timeRange) },
       hovermode: "x unified",
     };
     series.forEach((s, i) => {
@@ -115,7 +121,13 @@ export default function PlasmaSignals({ machine }: { machine: string }) {
       : [];
     layout.uirevision = `${machine}:${series.map((s) => s.name).join(",")}`;
     return { data, layout: layout as Partial<Plotly.Layout>, n };
-  }, [line, units, cursorMs, theme, machine]);
+  }, [line, units, cursorMs, theme, machine, timeRange]);
+
+  const onRelayout = useCallback((e: Record<string, unknown>) => {
+    const r = timeRangeFromRelayout(e);
+    if (r !== undefined) setTimeRange(r);
+  }, [setTimeRange]);
+  const onDoubleClick = useMemo(() => resetTimeRangeOnDoubleClick(setTimeRange), [setTimeRange]);
 
   const onClick = useCallback((e: Plotly.PlotMouseEvent) => {
     const x = e.points?.[0]?.x;
@@ -153,6 +165,14 @@ export default function PlasmaSignals({ machine }: { machine: string }) {
         <datalist id="plasma-signal-channels">
           {extraChannels.map((n) => <option key={n} value={n} />)}
         </datalist>
+        {timeRange && (
+          <button type="button" onClick={() => setTimeRange(null)}
+            title="Reset the shared time axis (every tab) to the full range"
+            style={{ fontSize: 11, padding: "1px 8px", borderRadius: 3, cursor: "pointer", marginLeft: "auto",
+              background: "var(--panel)", color: "var(--text-dim)", border: "1px solid var(--border)" }}>
+            t {Math.round(timeRange[0])}–{Math.round(timeRange[1])} ms · ↺ full range
+          </button>
+        )}
         <button type="button" onClick={onAdd}
           disabled={fetcher.busy || !addNames.length || invalid.length > 0}
           title={toFetch.length ? (fetcher.credsMissing ? CREDS_HINT : `Fetch ${toFetch.join(", ")} into this shot, then plot`) : "Add to the strip"}
@@ -174,9 +194,15 @@ export default function PlasmaSignals({ machine }: { machine: string }) {
         </div>
       )}
       {error && <div className="note" style={{ fontSize: 10 }}>signals unavailable for this shot</div>}
-      {open && figure.n > 0 && (
+      {open && plot && figure.n > 0 && (
         <Plot data={figure.data} layout={figure.layout} height={figure.n * PANEL_PX + 40}
-          onClick={onClick} exportName={`shot_${machine}_plasma_signals`} />
+          onClick={onClick} onRelayout={onRelayout} onDoubleClick={onDoubleClick}
+          exportName={`shot_${machine}_plasma_signals`} />
+      )}
+      {open && !plot && figure.n > 0 && (
+        <div className="note" style={{ fontSize: 10, color: "var(--text-dim)" }}>
+          plotted as panels in the Compare figure below (toggle “Plasma signals” there)
+        </div>
       )}
     </section>
   );

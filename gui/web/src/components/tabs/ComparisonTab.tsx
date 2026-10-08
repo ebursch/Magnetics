@@ -12,16 +12,18 @@ import { useNode } from "../../lib/useNode";
 import Plot from "../../lib/Plot";
 import type { ContourNode, HeatmapNode, LineNode, Node } from "../../lib/contract";
 import { MODE_PALETTE, plotChrome } from "../../lib/colormaps";
-import { QS_MODE_PALETTE, lineTraces, phiTimeTraces, spectrogramTrace } from "../../lib/plotTraces";
+import { displayScale, signalAxisTitle } from "../../lib/signalUnits";
+import { resetTimeRangeOnDoubleClick, timeRangeFromRelayout } from "../../lib/timeRange";
+import { LINE_PALETTE, QS_MODE_PALETTE, lineTraces, phiTimeTraces, spectrogramTrace } from "../../lib/plotTraces";
 import { QS_DEFAULTS, phiPeak } from "../../lib/qsTransforms";
 import { ROT_DEFAULTS, rotFetchParams } from "../../lib/rotatingTransforms";
 import {
   ANNOTATION_COLORS, DEFAULT_COLOR, annotationsToPlotly, parseAnnotations,
-  type Annotation, type AnnotationInput, type AnnotationKind, type AnnotationPatch, type PanelId,
+  type Annotation, type AnnotationInput, type AnnotationKind, type AnnotationPatch, type FixedPanelId, type PanelId,
 } from "../../lib/annotations";
 import { buildCompareFigure, panelForAxis, timeExtents, type PanelSpec } from "../../lib/compareLayout";
 
-const PANEL_LABEL: Record<PanelId, string> = {
+const PANEL_LABEL: Record<FixedPanelId, string> = {
   spec: "Spectrogram",
   mode_over_time: "n(t)",
   mode_amplitude: "Mode amplitude",
@@ -29,12 +31,16 @@ const PANEL_LABEL: Record<PanelId, string> = {
   amplitude: "QS amplitude",
   phase: "QS phase",
 };
-const PANEL_WEIGHT: Record<PanelId, number> = {
+const PANEL_WEIGHT: Record<FixedPanelId, number> = {
   spec: 1.5, mode_over_time: 0.7, mode_amplitude: 0.8, phi_t: 1.3, amplitude: 0.9, phase: 0.9,
 };
 // Display order, top → bottom: rotating analyses first, then quasi-stationary.
-const PANEL_ORDER: PanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
-const DEFAULT_PANELS: PanelId[] = ["spec", "phi_t", "amplitude", "phase"];
+const PANEL_ORDER: FixedPanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
+const DEFAULT_PANELS: FixedPanelId[] = ["spec", "phi_t", "amplitude", "phase"];
+const SIGNAL_WEIGHT = 0.6;
+const SIG_PREFIX = "sig:";
+/** Display name of any panel, including the per-signal `sig:<channel>` panels. */
+const panelLabel = (p: PanelId) => (p.startsWith(SIG_PREFIX) ? p.slice(SIG_PREFIX.length) : PANEL_LABEL[p as FixedPanelId]);
 
 type ClickMode = "cursor" | AnnotationKind;
 const CLICK_MODES: { id: ClickMode; label: string; hint: string }[] = [
@@ -63,15 +69,19 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   const setAnnotations = useStore((s) => s.setAnnotations);
   const annotations = useMemo(() => annotationsAll[machine] ?? [], [annotationsAll, machine]);
 
-  const [panels, setPanels] = useState<Set<PanelId>>(new Set(DEFAULT_PANELS));
+  const [panels, setPanels] = useState<Set<FixedPanelId>>(new Set(DEFAULT_PANELS));
+  // Plasma signals (the strip's selection: Ip, Bt, κ, …) as panels on the shared axis.
+  const traceSignals = useStore((s) => s.traceSignals);
+  const [showSignals, setShowSignals] = useState(true);
   const [specMode, setSpecMode] = useState<"n" | "power">("n");
   const [clickMode, setClickMode] = useState<ClickMode>("cursor");
   const [pendingSpan, setPendingSpan] = useState<number | null>(null);
-  const [xRange, setXRange] = useState<[number, number] | null>(null);
+  const xRange = useStore((s) => s.timeRange);
+  const setXRange = useStore((s) => s.setTimeRange);
   const [panelPx, setPanelPx] = useState(170);
 
-  const on = (p: PanelId) => panels.has(p);
-  const togglePanel = (p: PanelId) =>
+  const on = (p: FixedPanelId) => panels.has(p);
+  const togglePanel = (p: FixedPanelId) =>
     setPanels((prev) => {
       const next = new Set(prev);
       if (next.has(p)) next.delete(p); else next.add(p);
@@ -81,7 +91,7 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   // ── Data — only enabled panels fetch (a null machine suppresses useNode) ──
   const rot = useMemo(() => rotParams ?? rotFetchParams(ROT_DEFAULTS), [rotParams]);
   const qs = useMemo<Record<string, string>>(() => qsParams ?? { ...QS_DEFAULTS }, [qsParams]);
-  const m = (p: PanelId, cond = true) => (on(p) && cond ? machine : null);
+  const m = (p: FixedPanelId, cond = true) => (on(p) && cond ? machine : null);
 
   const spec = useNode(m("spec", specMode === "power"), "spectrogram", rot.spec);
   const modeNum = useNode(m("spec", specMode === "n"), "mode_number", rot.mode);
@@ -90,9 +100,12 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   const phiT = useNode(m("phi_t"), "phi_t", qs);
   const amp = useNode(m("amplitude"), "amplitude", qs);
   const phase = useNode(m("phase"), "phase_t", qs);
+  const sigs = useNode(
+    showSignals && traceSignals.length ? machine : null, "extra_signals", { signals: traceSignals.join(",") },
+  );
   const specRes = specMode === "n" ? modeNum : spec;
 
-  const fetched: Record<PanelId, { node: Node | null; error: string | null; loading: boolean }> = {
+  const fetched: Record<FixedPanelId, { node: Node | null; error: string | null; loading: boolean }> = {
     spec: specRes, mode_over_time: modeOverTime, mode_amplitude: modeAmp, phi_t: phiT, amplitude: amp, phase,
   };
 
@@ -118,10 +131,11 @@ export default function ComparisonTab({ machine }: { machine: string }) {
           yaxis: { title: { text: n.axes.y } },
         });
       } else if (id === "mode_amplitude" && modeAmp.node?.kind === "line") {
+        // One trace per |n| (series n=0…5, in order), colored like the n-map.
         const n = modeAmp.node as LineNode;
         out.push({
-          id, weight: PANEL_WEIGHT[id], traces: lineTraces(n, { palette: MODE_PALETTE.slice(1) }),
-          yaxis: { title: { text: "|δḂp| (arb.)" }, rangemode: "tozero" },
+          id, weight: PANEL_WEIGHT[id], traces: lineTraces(n, { palette: MODE_PALETTE }),
+          yaxis: { title: { text: "|δḂp| by n (arb.)" }, rangemode: "tozero" },
         });
       } else if (id === "phi_t" && phiT.node?.kind === "contour") {
         const n = phiT.node as ContourNode;
@@ -145,8 +159,25 @@ export default function ComparisonTab({ machine }: { machine: string }) {
         });
       }
     }
+    if (showSignals && sigs.node?.kind === "line") {
+      const n = sigs.node as LineNode;
+      const units = (n.meta?.units as Record<string, string> | undefined) ?? {};
+      n.series.forEach((s, i) => {
+        const sc = displayScale(units[s.name], s.y);
+        out.push({
+          id: `${SIG_PREFIX}${s.name}`, weight: SIGNAL_WEIGHT,
+          traces: [{
+            type: "scatter", mode: "lines", name: s.name, x: s.x,
+            y: sc.factor === 1 ? s.y : s.y.map((v) => v * sc.factor),
+            line: { color: LINE_PALETTE[i % LINE_PALETTE.length], width: 1.4 },
+          } as Partial<Plotly.PlotData>],
+          yaxis: { title: { text: signalAxisTitle(s.name, sc) } },
+        });
+      });
+    }
     return out;
-  }, [panels, specRes.node, specMode, modeOverTime.node, modeAmp.node, phiT.node, amp.node, phase.node, rot]);
+  }, [panels, specRes.node, specMode, modeOverTime.node, modeAmp.node, phiT.node, amp.node, phase.node, rot,
+    showSignals, sigs.node]);
 
   const extents = useMemo(
     () => timeExtents(panelSpecs.flatMap((p) => p.traces.map((t) => t.x as number[] | undefined))),
@@ -217,13 +248,10 @@ export default function ComparisonTab({ machine }: { machine: string }) {
   }, [clickMode, figure.axisOf, machine, pendingSpan, setCursorMs, addAnnotation]);
 
   const onRelayout = useCallback((e: Record<string, unknown>) => {
-    if (e["xaxis.autorange"] === true) setXRange(null);
-    else if (e["xaxis.range[0]"] != null) setXRange([Number(e["xaxis.range[0]"]), Number(e["xaxis.range[1]"])]);
-    else if (Array.isArray(e["xaxis.range"])) {
-      const [a, b] = e["xaxis.range"] as number[];
-      setXRange([Number(a), Number(b)]);
-    }
-  }, []);
+    const r = timeRangeFromRelayout(e);
+    if (r !== undefined) setXRange(r);
+  }, [setXRange]);
+  const onDoubleClick = useMemo(() => resetTimeRangeOnDoubleClick(setXRange), [setXRange]);
 
   const height = Math.max(260, panelSpecs.reduce((a, p) => a + (p.weight ?? 1), 0) * panelPx + 90);
 
@@ -251,6 +279,9 @@ export default function ComparisonTab({ machine }: { machine: string }) {
             <input type="checkbox" checked={on(p)} onChange={() => togglePanel(p)} /> {PANEL_LABEL[p]}
           </label>
         ))}
+        <label className="cmp-check" title="The plasma signals selected in the strip above (Ip, Bt, κ, …), one panel each">
+          <input type="checkbox" checked={showSignals} onChange={() => setShowSignals((v) => !v)} /> Plasma signals
+        </label>
         <span className="cmp-sep" />
         <div className="seg" role="group" aria-label="Spectrogram view">
           <button type="button" className={`seg-btn${specMode === "n" ? " active" : ""}`} aria-pressed={specMode === "n"}
@@ -292,13 +323,13 @@ export default function ComparisonTab({ machine }: { machine: string }) {
       <div className="cmp-dim-row">
         {source}
         {status.map((s) => (
-          <span key={s.p} className={s.err ? "cmp-warn" : "cmp-dim"}>· {PANEL_LABEL[s.p]}: {s.text}</span>
+          <span key={s.p} className={s.err ? "cmp-warn" : "cmp-dim"}>· {panelLabel(s.p)}: {s.text}</span>
         ))}
       </div>
 
       {panelSpecs.length ? (
         <Plot data={figure.data} layout={figure.layout} height={height}
-          onClick={onClick} onRelayout={onRelayout} exportName={`shot_${machine}_compare`} />
+          onClick={onClick} onRelayout={onRelayout} onDoubleClick={onDoubleClick} exportName={`shot_${machine}_compare`} />
       ) : (
         <div className="placeholder">{panels.size ? "Loading…" : "Select at least one panel."}</div>
       )}
@@ -448,7 +479,7 @@ function AnnotationEditor({
           <>
             <select className="cmp-input" aria-label="panel" value={effPanel}
               onChange={(e) => setPanel(e.target.value as PanelId)}>
-              {visiblePanels.map((p) => <option key={p} value={p}>{PANEL_LABEL[p]}</option>)}
+              {visiblePanels.map((p) => <option key={p} value={p}>{panelLabel(p)}</option>)}
             </select>
             <label className="cmp-check">y
               <input className="cmp-input" style={{ width: 72 }} aria-label="y value" value={y} onChange={(e) => setY(e.target.value)} />
@@ -471,7 +502,7 @@ function AnnotationEditor({
             {annotations.map((a) => (
               <tr key={a.id}>
                 <td>{KIND_LABEL[a.kind]}</td>
-                <td>{a.kind === "hline" || a.kind === "point" ? PANEL_LABEL[a.panel] : "all"}</td>
+                <td>{a.kind === "hline" || a.kind === "point" ? panelLabel(a.panel) : "all"}</td>
                 <td>
                   {a.kind === "vline" || a.kind === "point" ? (
                     <NumField label="time" value={a.t} onCommit={(v) => onUpdate(a.id, { t: v })} />

@@ -180,7 +180,7 @@ export default function App() {
         {/* Ip / Bt / κ / any channel, on every tab (needs the live backend) */}
         {machine && !mock && (
           <ErrorBoundary resetKeys={[machine]} label="The plasma-signal strip">
-            <PlasmaSignals machine={machine} />
+            <PlasmaSignals machine={machine} plot={tab !== "compare"} />
           </ErrorBoundary>
         )}
         {!machine ? (

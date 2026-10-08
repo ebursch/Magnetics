@@ -4,10 +4,12 @@
 // the store only holds plain JSON (persisted to localStorage, exportable as a file).
 import type Plotly from "plotly.js-dist-min";
 
-/** Panels of the Compare figure — the target of a panel-anchored annotation. */
-export type PanelId = "spec" | "mode_over_time" | "mode_amplitude" | "phi_t" | "amplitude" | "phase";
+/** Panels of the Compare figure — the target of a panel-anchored annotation. The fixed
+ *  analysis panels, plus one `sig:<channel>` panel per plasma signal (Ip, Bt, κ, …). */
+export type FixedPanelId = "spec" | "mode_over_time" | "mode_amplitude" | "phi_t" | "amplitude" | "phase";
+export type PanelId = FixedPanelId | `sig:${string}`;
 
-export const PANEL_IDS: PanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
+export const PANEL_IDS: FixedPanelId[] = ["spec", "mode_over_time", "mode_amplitude", "phi_t", "amplitude", "phase"];
 
 interface Base {
   id: string;
@@ -45,7 +47,8 @@ export function newAnnotationId(): string {
 }
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-const isPanel = (v: unknown): v is PanelId => PANEL_IDS.includes(v as PanelId);
+const isPanel = (v: unknown): v is PanelId =>
+  PANEL_IDS.includes(v as FixedPanelId) || (typeof v === "string" && /^sig:[A-Za-z0-9_]+$/.test(v));
 
 /** Validate untrusted JSON (localStorage / an imported file) into annotations.
  *  Invalid entries are dropped, not thrown on; missing ids are regenerated. */

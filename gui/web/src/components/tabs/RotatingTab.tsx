@@ -2,17 +2,18 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import type * as Plotly from "plotly.js";
 import { useStore } from "../../store";
 import { useNode } from "../../lib/useNode";
-import { POWER_SEQUENTIAL, FIELD_DIVERGING, modeColor } from "../../lib/colormaps";
+import { POWER_SEQUENTIAL, FIELD_DIVERGING, MODE_PALETTE, modeColor } from "../../lib/colormaps";
 import Plot from "../../lib/Plot";
 import NodeView from "../../lib/NodeView";
 import DraggableDivider from "../../lib/DraggableDivider";
 import { usingLiveBackend, fetchChannelUsage, type ChannelUsage } from "../../lib/api";
-import type { Node } from "../../lib/contract";
+import type { LineNode, Node } from "../../lib/contract";
 import {
   GATE_POS_DEFAULT, GATE_POS_MAX, gatePosToPct, medianStep, percentile, rotFetchParams,
   ROT_DEFAULTS,
 } from "../../lib/rotatingTransforms";
-import { spectrogramTrace } from "../../lib/plotTraces";
+import { lineTraces, spectrogramTrace } from "../../lib/plotTraces";
+import { resetTimeRangeOnDoubleClick, sharedXAxis, timeRangeFromRelayout } from "../../lib/timeRange";
 
 // Offline synthetic-demo constants. These were formerly user-facing knobs (PEST λ and
 // sensor-shielding cutoff) that only ever affected the no-backend demo — they have no
@@ -68,6 +69,15 @@ export default function RotatingTab({ machine }: { machine: string }) {
   // Foreground ink that flips with the theme so the raw dB/dt trace stays visible on
   // the light plot background (it was hard-coded white → invisible in light mode).
   const dark = useStore((s) => s.theme === "dark");
+  // Global shared time axis (plasma-signal strip, QS, Compare): the spectrogram and the
+  // time tracks below follow it, and zooming their time axis sets it.
+  const timeRange = useStore((s) => s.timeRange);
+  const setTimeRange = useStore((s) => s.setTimeRange);
+  const onTimeRelayout = useCallback((e: Record<string, unknown>) => {
+    const r = timeRangeFromRelayout(e);
+    if (r !== undefined) setTimeRange(r);
+  }, [setTimeRange]);
+  const onTimeDoubleClick = useMemo(() => resetTimeRangeOnDoubleClick(setTimeRange), [setTimeRange]);
   const ink = dark ? "rgba(255,255,255,0.85)" : "rgba(20,34,46,0.9)";
   
   // View states
@@ -747,7 +757,7 @@ export default function RotatingTab({ machine }: { machine: string }) {
       // Plotly only resets the view when uirevision changes, which we tie to the band, so
       // editing f_min/f_max intentionally re-frames while everything else keeps the crop.
       uirevision: `${machine}:${fmin}:${fmax}`,
-      xaxis: { title: { text: processedSpecNode.axes.x } },
+      xaxis: { title: { text: processedSpecNode.axes.x }, ...sharedXAxis(timeRange) },
       // Pin the band to the knobs so the n-map (mostly null above the modes) doesn't
       // autorange-trim to ~30 kHz — both views show the full requested 0–fmax band.
       yaxis: { title: { text: processedSpecNode.axes.y }, range: [fmin, fmax] as [number, number] },
@@ -785,7 +795,7 @@ export default function RotatingTab({ machine }: { machine: string }) {
     // Fill the card: subtract its 12px padding (×2), ~38px header and the 8px gap, so the
     // plot — and its x-axis title — fit instead of overflowing and getting clipped.
     const plotH = Math.max(220, specHeight - 78);
-    return <Plot data={data} layout={layout} height={plotH} onClick={handlePlotClick} exportName={`shot_${machine}_spectrogram`} download={{ machine, nodeId: "spectrogram", params: specParams }} />;
+    return <Plot data={data} layout={layout} height={plotH} onClick={handlePlotClick} onRelayout={onTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={`shot_${machine}_spectrogram`} download={{ machine, nodeId: "spectrogram", params: specParams }} />;
   };
 
   const renderSubInterval = () => {
@@ -1030,6 +1040,50 @@ export default function RotatingTab({ machine }: { machine: string }) {
         <div style={{ flex: 1, minHeight: 0 }}>
           <NodeView node={node} height={height} exportName={exportName} download={download} />
         </div>
+      </div>
+    );
+  };
+
+  // A time-track card (n(t), persistence, per-n amplitude): like analysisCard, but on the
+  // global shared time axis with the time cursor, click-to-set-cursor, and an optional
+  // palette/legend (per-|n| traces use the n-map colors).
+  const timeCard = (
+    title: string,
+    node: Node | null,
+    subtitle: string,
+    download: { machine: string; nodeId: string },
+    opts?: { palette?: string[]; legend?: string },
+  ) => {
+    if (!node || node.kind !== "line") return null;
+    const n = node as LineNode;
+    const layout = {
+      uirevision: `${machine}:${download.nodeId}`,
+      xaxis: { title: { text: n.axes.x }, ...sharedXAxis(timeRange) },
+      yaxis: { title: { text: n.axes.y } },
+      showlegend: !!opts?.legend,
+      ...(opts?.legend ? {
+        legend: { title: { text: opts.legend }, orientation: "h" as const, x: 0, y: 1.02, yanchor: "bottom" as const, font: { size: 10 } },
+      } : {}),
+      margin: { t: opts?.legend ? 28 : 10, b: 40, l: 60, r: 16 },
+      shapes: [{
+        type: "line" as const, xref: "x" as const, yref: "paper" as const,
+        x0: cursorMs, x1: cursorMs, y0: 0, y1: 1,
+        line: { color: dark ? "#2ee6cf" : "#0a8d80", width: 1.5, dash: "dash" as const },
+      }],
+    };
+    const onClick = (e: Plotly.PlotMouseEvent) => {
+      const x = e.points?.[0]?.x;
+      if (typeof x === "number") setCursorMs(x);
+    };
+    return (
+      <div className="card" style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: "8px", margin: "7px 0 0 0", minHeight: 0 }}>
+        <h4 style={{ margin: 0, fontSize: "calc(11px * var(--font-scale))", fontWeight: 600, textTransform: "uppercase", color: "var(--accent)" }}>
+          {title}
+          <span style={{ color: "var(--text-dim)", fontWeight: 400, textTransform: "none" }}> · {subtitle}</span>
+        </h4>
+        <Plot data={lineTraces(n, { palette: opts?.palette })} layout={layout} height={opts?.legend ? 230 : 200}
+          onClick={onClick} onRelayout={onTimeRelayout} onDoubleClick={onTimeDoubleClick}
+          exportName={`shot_${download.machine}_${download.nodeId}`} download={download} />
       </div>
     );
   };
@@ -1644,12 +1698,12 @@ export default function RotatingTab({ machine }: { machine: string }) {
             </div>
           </div>
         )}
-        {analysisCard("Mode Persistence", modeTrackNode, "line", 200,
+        {timeCard("Mode Persistence", modeTrackNode,
           shapeMeta(modeTrackNode)?.dominant_n != null
             ? `shape similarity to the dominant mode vs time (1 = persists) · n≈${shapeMeta(modeTrackNode)!.dominant_n}`
             : "shape similarity to the dominant mode vs time",
           { machine, nodeId: "mode_track" })}
-        {analysisCard("Toroidal Mode vs Time", modeOverTimeNode, "line", 200,
+        {timeCard("Toroidal Mode vs Time", modeOverTimeNode,
           shapeMeta(modeOverTimeNode)?.dominant_n != null
             ? `n of the strongest mode (freq follows the ridge${
                 Array.isArray(shapeMeta(modeOverTimeNode)?.f_range_kHz)
@@ -1657,11 +1711,10 @@ export default function RotatingTab({ machine }: { machine: string }) {
                   : ""}) · dominant n≈${shapeMeta(modeOverTimeNode)!.dominant_n}`
             : "best-fit toroidal n over time",
           { machine, nodeId: "mode_over_time" })}
-        {analysisCard("Mode Amplitude vs Time", modeAmplitudeNode, "line", 200,
-          shapeMeta(modeAmplitudeNode)?.n_probes != null
-            ? `strongest mode (same ridge as n(t)) · probe-averaged |δḂp| over ${shapeMeta(modeAmplitudeNode)!.n_probes} probes`
-            : "amplitude of the strongest mode over time",
-          { machine, nodeId: "mode_amplitude" })}
+        {timeCard("Mode Amplitude vs Time", modeAmplitudeNode,
+          `one trace per toroidal |n| (n-map colors) · probe-averaged |δḂp| at each n's strongest in-band frequency${
+            shapeMeta(modeAmplitudeNode)?.n_probes != null ? `, ${shapeMeta(modeAmplitudeNode)!.n_probes} probes` : ""}`,
+          { machine, nodeId: "mode_amplitude" }, { palette: MODE_PALETTE, legend: "|n|" })}
       </div>
     </div>
   );

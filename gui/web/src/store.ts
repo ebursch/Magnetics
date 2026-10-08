@@ -136,6 +136,9 @@ interface State {
   device: string; // selected device id (single source of truth)
   tab: TabId;
   cursorMs: number; // shared time cursor across views
+  // Shared time axis (ms) of every time-series plot — strip, QS, rotating, Compare;
+  // null = autorange. Zooming any of them sets it; a shot change clears it.
+  timeRange: [number, number] | null;
   loadingMachines: boolean;
   theme: Theme;
   fetchCreds: FetchCreds; // shared by PullControl + the QS custom-signal panel
@@ -156,6 +159,7 @@ interface State {
   setDevice: (id: string) => void;
   setTab: (t: TabId) => void;
   setCursorMs: (t: number) => void;
+  setTimeRange: (r: [number, number] | null) => void;
   toggleTheme: () => void;
   setFetchCreds: (patch: Partial<FetchCreds>) => void;
   setFontScale: (n: number) => void;
@@ -176,6 +180,7 @@ export const useStore = create<State>((set) => ({
   device: "",
   tab: "sensors",
   cursorMs: 0,
+  timeRange: null,
   loadingMachines: true,
   theme: loadTheme(),
   // Default to the fast cluster path (remote); PullControl's device snap adjusts it.
@@ -227,10 +232,13 @@ export const useStore = create<State>((set) => ({
     const machines = await fetchMachines();
     set({ machines, machine: machines[0]?.id ?? null });
   },
-  setMachine: (id) => set({ machine: id }),
+  setMachine: (id) => set((s) => (s.machine === id ? {} : { machine: id, timeRange: null })),
   setDevice: (id) => set({ device: id }),
   setTab: (t) => set({ tab: t }),
   setCursorMs: (t) => set({ cursorMs: t }),
+  setTimeRange: (r) =>
+    set((s) => (r === s.timeRange || (r && s.timeRange && r[0] === s.timeRange[0] && r[1] === s.timeRange[1])
+      ? {} : { timeRange: r })),
   setRotParams: (p) => set({ rotParams: p }),
   setQsParams: (p) => set({ qsParams: p }),
   addAnnotation: (machine, a) =>

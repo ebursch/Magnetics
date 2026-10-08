@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type Plotly from "plotly.js-dist-min";
 import { useStore } from "../../store";
 import { CREDS_HINT, POINTNAME_RE, splitSignalNames, useSignalFetch } from "../../lib/useSignalFetch";
+import { resetTimeRangeOnDoubleClick } from "../../lib/timeRange";
 import { useNode } from "../../lib/useNode";
 import NodeView from "../../lib/NodeView";
 import Plot from "../../lib/Plot";
@@ -183,18 +184,25 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   ]);
 
 
-  // Linked time-axis zoom (declared here so the trim-window effect below can reset it).
-  const [timeRange, setTimeRange] = useState<[number, number] | null>(null);
+  // Linked time-axis zoom — the GLOBAL shared time axis (plasma-signal strip, rotating,
+  // Compare all follow it). Declared here so the trim-window effect below can reset it.
+  const timeRange = useStore((s) => s.timeRange);
+  const setTimeRange = useStore((s) => s.setTimeRange);
 
   // ── Typed y-axis zoom (client-side only — doesn't touch fetched data) ──
   const [phiYMin, setPhiYMin] = useState("");  // "" = auto (0–360°)
   const [phiYMax, setPhiYMax] = useState("");
 
   // When the trim window changes, clear any user zoom so the axis re-fits to the new data.
+  // Only on a real change — not on mount, which would wipe the zoom shared with the
+  // other tabs every time this one opens.
+  const trimKeyRef = useRef(`${tminMs}|${tmaxMs}`);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset zoom to refit the axis on a new trim window
+    const k = `${tminMs}|${tmaxMs}`;
+    if (trimKeyRef.current === k) return;
+    trimKeyRef.current = k;
     setTimeRange(null);
-  }, [tminMs, tmaxMs]);
+  }, [tminMs, tmaxMs, setTimeRange]);
 
   // A different array has different channels, so stale exclusions don't apply.
   useEffect(() => {
@@ -214,11 +222,13 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
     if (committedParams) setQsParams(committedParams);
   }, [committedParams, setQsParams]);
 
-  // When Plot is clicked (committedParams changes), reset zoom to fit new data.
+  // When Plot is clicked (committedParams changes), reset zoom to fit new data — but not
+  // for the automatic first commit on mount (that would wipe the shared zoom).
+  const prevCommitRef = useRef(committedParams);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset zoom when new computation is triggered
-    setTimeRange(null);
-  }, [committedParams]);
+    if (prevCommitRef.current !== null && prevCommitRef.current !== committedParams) setTimeRange(null);
+    prevCommitRef.current = committedParams;
+  }, [committedParams, setTimeRange]);
 
   // null fetchMachine suppresses all useNode fetches until initial commit fires.
   const fetchMachine = committedParams !== null ? machine : null;
@@ -363,13 +373,15 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
   }, [setCursorMs]);
 
   // ── Linked time-axis zoom (state declared above) ──────────────────
+  // Double-click → full range on every tab (see resetTimeRangeOnDoubleClick).
+  const onTimeDoubleClick = useMemo(() => resetTimeRangeOnDoubleClick(setTimeRange), [setTimeRange]);
   const handleTimeRelayout = useCallback((e: Record<string, unknown>) => {
     if (e["xaxis.autorange"] === true) {
       setTimeRange(null);
     } else if (e["xaxis.range[0]"] != null) {
       setTimeRange([Number(e["xaxis.range[0]"]), Number(e["xaxis.range[1]"])]);
     }
-  }, []);
+  }, [setTimeRange]);
 
   // φ(t) contour: also keep the "y (θ°)" boxes in sync when the user zooms/pans/
   // double-click-resets the plot directly (drag-box zoom, scroll, etc.), not just
@@ -405,7 +417,7 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
       setPhiYMin(String(Math.round(Number(e["yaxis.range[0]"]) * 10) / 10));
       setPhiYMax(String(Math.round(Number(e["yaxis.range[1]"]) * 10) / 10));
     }
-  }, [setPhiYMin, setPhiYMax]);
+  }, [setPhiYMin, setPhiYMax, setTimeRange]);
 
   // ── Shared time axis ──────────────────────────────────────────────
   // Double-click resets to [tMin, tMax] — the union of every linked panel's real
@@ -1015,18 +1027,18 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
                 xaxis: { ...timeXAxis, showticklabels: false },
                 yaxis: { title: { text: "RMS (G)" }, rangemode: "tozero" as const },
                 margin: { t: 4, b: 4, l: 60, r: 80 },
-              } as Partial<Plotly.Layout>} onClick={seekTo} onRelayout={handleTimeRelayout} exportName={xn("phi_rms")} download={dl("phi_t")} />
+              } as Partial<Plotly.Layout>} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("phi_rms")} download={dl("phi_t")} />
             )}
-            <Plot height={400} data={phiTimeData} layout={phiTimeLayout} onClick={seekTo} onRelayout={handlePhiRelayout} exportName={xn("phi_t")} download={dl("phi_t")} />
+            <Plot height={400} data={phiTimeData} layout={phiTimeLayout} onClick={seekTo} onRelayout={handlePhiRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("phi_t")} download={dl("phi_t")} />
           </div>
         )}
 
         {/* Section 7: Mode amplitude & phase */}
         {ampNode?.kind === "line" && (
-          <Plot height={200} data={ampData} layout={ampLayout} onClick={seekTo} onRelayout={handleTimeRelayout} exportName={xn("amplitude")} download={dl("amplitude")} />
+          <Plot height={200} data={ampData} layout={ampLayout} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("amplitude")} download={dl("amplitude")} />
         )}
         {phaseTimeNode?.kind === "line" && (
-          <Plot height={200} data={phaseTimeData} layout={phaseTimeLayout} onClick={seekTo} onRelayout={handleTimeRelayout} exportName={xn("phase_t")} download={dl("phase_t")} />
+          <Plot height={200} data={phaseTimeData} layout={phaseTimeLayout} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("phase_t")} download={dl("phase_t")} />
         )}
       </div>
 
@@ -1098,7 +1110,7 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
                   showlegend: false,
                   margin: { t: 4, b: 34, l: 64, r: 20 },
                 } as Partial<Plotly.Layout>)}
-                onClick={seekTo} onRelayout={handleTimeRelayout}
+                onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick}
                 exportName={xn(`custom_${s.name}`)} />
             ))}
           </div>
@@ -1147,13 +1159,13 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
                     showlegend: false,
                     margin: { t: 2, b: isLast ? 34 : 2, l: 92, r: 20 },
                   } as Partial<Plotly.Layout>)}
-                  onClick={seekTo} onRelayout={handleTimeRelayout}
+                  onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick}
                   exportName={xn(`signal_${pair.channel}`)} />
               );
             })}
           </div>
         ) : (
-          <Plot height={240} data={signalData} layout={signalLayout} onClick={seekTo} onRelayout={handleTimeRelayout}
+          <Plot height={240} data={signalData} layout={signalLayout} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick}
             exportName={xn("signal_conditioning")} download={dl("signal_conditioning")} />
         )}
       </div>
@@ -1168,12 +1180,12 @@ export default function QuasiStationaryTab({ machine }: { machine: string }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {/* Residuals — top */}
               {fitResNode
-                ? <Plot height={150} data={fitResData} layout={fitResLayout} onClick={seekTo} onRelayout={handleTimeRelayout} exportName={xn("fit_residuals")} download={dl("fit_residuals")} />
+                ? <Plot height={150} data={fitResData} layout={fitResLayout} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("fit_residuals")} download={dl("fit_residuals")} />
                 : <div className="placeholder" style={{ height: 150 }}>{fitResError ? `residuals unavailable: ${fitResError.replace(/^Error:\s*/, "")}` : "loading residuals…"}</div>
               }
               {/* Chi² — bottom */}
               {chiSqNode
-                ? <Plot height={130} data={chiSqData} layout={chiSqLayout} onClick={seekTo} onRelayout={handleTimeRelayout} exportName={xn("chi_sq_t")} download={dl("chi_sq_t")} />
+                ? <Plot height={130} data={chiSqData} layout={chiSqLayout} onClick={seekTo} onRelayout={handleTimeRelayout} onDoubleClick={onTimeDoubleClick} exportName={xn("chi_sq_t")} download={dl("chi_sq_t")} />
                 : <div className="placeholder" style={{ height: 130 }}>{chiSqError ? `χ² unavailable: ${chiSqError.replace(/^Error:\s*/, "")}` : "loading χ²…"}</div>
               }
             </div>
