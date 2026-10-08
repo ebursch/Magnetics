@@ -19,7 +19,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from ..core import contracts, geometry, mode_shape, qs_bridge, spectral
+from ..core import contracts, geometry, mode_shape, plasma, qs_bridge, spectral
 from ..data import device_geom, devices, diiid_geometry, h5source
 
 logger = logging.getLogger(__name__)
@@ -166,6 +166,7 @@ def refresh() -> None:
         _array_mode_spec,
         _ridge_track,
         _amplitude_by_n,
+        _flattop,
         _qs_run,
         _dev_geom,
         _real_theta,  # channel→θ map derives from channel_names: stale after a re-pull
@@ -182,6 +183,57 @@ def _device_key(shot):
         return devices.load_device(disp), disp
     except Exception:  # noqa: BLE001 — unknown device → legacy path
         return None, None
+
+
+# ── Ip flattop: the optional analysis cut-off (``cut_flattop=1``) ─────────────
+def _ip_channel(shot) -> str | None:
+    """The shot file's plasma-current channel: the device file's ``plasma pointnames →
+    current`` name (DIII-D ``ip``, KSTAR ``Ip``), else a common spelling; None if absent."""
+    names = set(h5source.channel_names(str(shot)))
+    cands = []
+    try:
+        dev = devices.load_device(_dev_geom(str(shot)).device_id)
+        name = ((dev.get("plasma pointnames") or {}).get("current") or {}).get("name")
+        if name:
+            cands.append(name)
+    except Exception:  # noqa: BLE001 — no device file → common spellings only
+        pass
+    return next((c for c in [*cands, "ip", "Ip", "IP"] if c in names), None)
+
+
+@lru_cache(maxsize=16)
+def _flattop(shot):
+    """The shot's Ip flattop (``plasma.ip_flattop``), or None without a usable Ip."""
+    ch = _ip_channel(shot)
+    if ch is None:
+        return None
+    t_ms, ip = h5source.load_channel(str(shot), ch)
+    try:
+        return plasma.ip_flattop(t_ms, ip)
+    except ValueError:
+        return None
+
+
+def _flattop_cut_s(shot, params) -> float | None:
+    """End of the Ip flattop (s) when the GUI asks to stop the analysis there
+    (``cut_flattop=1``) and the shot has an Ip trace; else None (no cut)."""
+    if not _flag(params, "cut_flattop"):
+        return None
+    ft = _flattop(str(shot))
+    return ft.t_end_ms / 1e3 if ft else None
+
+
+def _crop_time(node: dict, t_end_ms: float) -> dict:
+    """Drop the time columns after ``t_end_ms`` from a time-x heatmap node (z is
+    row-major [i_y][i_x])."""
+    x = node.get("x") or []
+    keep = [i for i, t in enumerate(x) if t <= t_end_ms]
+    if len(keep) == len(x):
+        return node
+    node["x"] = [x[i] for i in keep]
+    node["z"] = [[row[i] for i in keep] for row in node.get("z", [])]
+    node.setdefault("meta", {})["cut_at_ms"] = round(t_end_ms, 1)
+    return node
 
 
 def _arrays(shot):
@@ -1298,6 +1350,9 @@ def _mode_track(shot, params=None) -> dict:
     # Sample finely, but only over the active-signal window — the full record is mostly
     # dead time, which both coarsens the trace and biases the dominant mode toward n=0.
     t_lo, t_hi = mode_shape.active_time_window(spec)
+    cut = _flattop_cut_s(shot, params)
+    if cut is not None:
+        t_hi = max(t_lo, min(t_hi, cut))
     tr = mode_shape.track_from_spectrum(
         spec, phis, f_khz * 1e3, n_slices=n_slices, t_range=(t_lo, t_hi)
     )
@@ -1327,7 +1382,7 @@ def _mode_track(shot, params=None) -> dict:
 
 # ── strongest-mode ridge track: shared by n(t) and its amplitude ─────────────
 @lru_cache(maxsize=4)
-def _ridge_track(shot, n_slices):
+def _ridge_track(shot, n_slices, t_cut=None):
     """Strongest in-band mode per time slice (``ridge_track_from_spectrum``) over the
     active-signal window, cached so the n(t) and amplitude(t) nodes run it once.
     Returns (ridge, (t_lo, t_hi) s, n_probes)."""
@@ -1335,6 +1390,8 @@ def _ridge_track(shot, n_slices):
     phis = np.array([p for _, p in arr], dtype=float)
     spec = _array_spectrum(str(shot), tuple(n for n, _ in arr))
     t_lo, t_hi = mode_shape.active_time_window(spec)
+    if t_cut is not None:  # stop at the Ip flattop end
+        t_hi = max(t_lo, min(t_hi, t_cut))
     tr = mode_shape.ridge_track_from_spectrum(spec, phis, n_slices=n_slices, t_range=(t_lo, t_hi))
     return tr, (t_lo, t_hi), len(arr)
 
@@ -1362,7 +1419,9 @@ def _mode_over_time(shot, params=None) -> dict:
     to one global bin while other simultaneous modes go unrepresented. Cursor-independent
     and restricted to the active-signal window. The full (t,f) n-map (``mode_number``)
     is the complete multi-mode view; this is its 1-D strongest-mode summary."""
-    tr, t_win, n_probes = _ridge_track(str(shot), _i(params, "n_slices", 300))
+    tr, t_win, n_probes = _ridge_track(
+        str(shot), _i(params, "n_slices", 300), _flattop_cut_s(shot, params)
+    )
     series = [
         {
             "name": "toroidal n (strongest mode)",
@@ -1383,13 +1442,15 @@ def _mode_over_time(shot, params=None) -> dict:
 
 # ── mode_amplitude: rotating-mode amplitude vs time, one trace per |n| ───────
 @lru_cache(maxsize=4)
-def _amplitude_by_n(shot, n_slices):
+def _amplitude_by_n(shot, n_slices, t_cut=None):
     """Per-|n| amplitude track over the same active window and slices as the ridge
     track (so it lines up with n(t)); cached alongside it. Returns (result, n_probes)."""
     arr = _toroidal_arr(str(shot))
     phis = np.array([p for _, p in arr], dtype=float)
     spec = _array_spectrum(str(shot), tuple(n for n, _ in arr))
     t_lo, t_hi = mode_shape.active_time_window(spec)
+    if t_cut is not None:  # stop at the Ip flattop end (same slices as _ridge_track)
+        t_hi = max(t_lo, min(t_hi, t_cut))
     res = mode_shape.mode_amplitude_by_n(spec, phis, n_slices=n_slices, t_range=(t_lo, t_hi))
     return res, len(arr)
 
@@ -1399,7 +1460,9 @@ def _mode_amplitude(shot, params=None) -> dict:
     STFT magnitude |δḂp| of the strongest in-band cell whose best-fit n is ±n. Each
     (t, f) cell counts toward only its own n, so a strong n=1 doesn't echo into n=2;
     gaps (null) mark times where an |n| owns no cell. Same slices as ``mode_over_time``."""
-    res, n_probes = _amplitude_by_n(str(shot), _i(params, "n_slices", 300))
+    res, n_probes = _amplitude_by_n(
+        str(shot), _i(params, "n_slices", 300), _flattop_cut_s(shot, params)
+    )
     t = res.t_ms.tolist()
 
     def _nulls(row):
@@ -1581,6 +1644,9 @@ def _prep_qs_ds(shot, params):
     tmax_ms_str = params.get("tmax_ms") if params else None
     tmin_s = float(tmin_ms_str) / 1e3 if tmin_ms_str else tmin_s_auto
     tmax_s = float(tmax_ms_str) / 1e3 if tmax_ms_str else tmax_s_auto
+    cut = _flattop_cut_s(shot, params)
+    if cut is not None and cut > tmin_s:  # stop the fit at the Ip flattop end
+        tmax_s = min(tmax_s, cut)
 
     # Serialize concurrent calls with the same args: only one thread runs
     # run_steps; the others wait and then read the cached result instantly.
@@ -1737,6 +1803,11 @@ def _signal_units(geom, name: str) -> str:
     return _KIND_UNITS.get(geom.kind_of(name), "")
 
 
+def _flattop_ms(shot) -> list[float] | None:
+    ft = _flattop(str(shot))
+    return [round(ft.t_start_ms, 1), round(ft.t_end_ms, 1)] if ft else None
+
+
 def _extra_signals(shot, params=None) -> dict:
     """User-requested raw signals (Ip, Bt, κ, Dα, …) as time series → LineNode.
 
@@ -1787,6 +1858,8 @@ def _extra_signals(shot, params=None) -> dict:
             "requested": names,
             "available": groups,
             "units": units,
+            "ip_channel": _ip_channel(shot),
+            "flattop_ms": _flattop_ms(shot),
         },
     )
 
@@ -1833,4 +1906,14 @@ def build_node(shot: str, node_id: str, params: dict | None = None) -> dict:
     if node_id not in _BUILDERS:
         raise KeyError(f"unknown node {node_id!r}; have {', '.join(sorted(_BUILDERS))}")
     h5source.shot_file(shot)  # raises KeyError if the shot isn't available
-    return _BUILDERS[node_id](shot, params)
+    node = _BUILDERS[node_id](shot, params)
+    # Rotating (t, f) maps run over the whole record; with cut_flattop=1 drop the
+    # columns after the Ip flattop. (The QS fit and the rotating tracks apply the cut
+    # inside their builders, so their fits/metadata see only the flattop.)
+    cut = _flattop_cut_s(shot, params) if node_id in _TF_MAPS else None
+    if cut is not None and node.get("kind") == "heatmap":
+        node = _crop_time(node, cut * 1e3)
+    return node
+
+
+_TF_MAPS = {"spectrogram", "mode_number", "coherence"}

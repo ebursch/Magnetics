@@ -435,3 +435,34 @@ def test_mode_number_band_follows_fmax(synthetic_shot, monkeypatch):
         assert captured["fmax"] == 50_000.0  # within the default step
     finally:
         nodes.refresh()  # don't leak spy-built cache entries
+
+
+def test_cut_flattop_stops_every_time_analysis_at_the_flattop_end(monkeypatch):
+    """cut_flattop=1 ends the rotating maps and tracks and the QS fit at the Ip
+    flattop end; without it (or without an Ip flattop) nothing is cut."""
+    from magnetics.core.plasma import Flattop
+
+    shot = _first_shot()
+    full = nodes.build_node(shot, "spectrogram")
+    t0, t1 = full["x"][0], full["x"][-1]
+    end = t0 + 0.6 * (t1 - t0)
+    monkeypatch.setattr(nodes, "_flattop", lambda s: Flattop("ip_flattop", t0, end, 1.0e6, 0.95))
+    cut = {"cut_flattop": "1"}
+
+    spec = nodes.build_node(shot, "spectrogram", cut)
+    assert spec["x"][-1] <= end < t1 and spec["meta"]["cut_at_ms"] == round(end, 1)
+    assert len(spec["z"][0]) == len(spec["x"])
+    for nid in ("mode_over_time", "mode_amplitude", "mode_track"):
+        xs = nodes.build_node(shot, nid, cut)["series"][0]["x"]
+        assert xs[-1] <= end + 1e-6, nid
+    amp = nodes.build_node(shot, "amplitude", cut)
+    assert amp["series"][0]["x"][-1] <= end + 1.0  # QS fit window clamped (rounded ms)
+    assert nodes.build_node(shot, "spectrogram")["x"][-1] == t1  # flag off → uncut
+
+
+def test_extra_signals_reports_the_ip_flattop():
+    shot = _first_shot()
+    meta = nodes.build_node(shot, "extra_signals")["meta"]
+    assert meta["ip_channel"] == "ip"
+    lo, hi = meta["flattop_ms"]
+    assert lo < hi
